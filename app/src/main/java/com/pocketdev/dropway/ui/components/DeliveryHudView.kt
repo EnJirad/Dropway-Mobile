@@ -195,13 +195,15 @@ fun DeliveryHudView(
         if (bestLocation != null) {
             driverLat = bestLocation.latitude
             driverLng = bestLocation.longitude
+            val js = "if (window.updateDriverLocation) { window.updateDriverLocation(${bestLocation.latitude}, ${bestLocation.longitude}); }"
+            webViewRef?.evaluateJavascript(js, null)
         }
 
         // 2. Request active updates on both GPS and Network providers
         for (p in listOf(LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER)) {
             try {
                 if (locationManager.isProviderEnabled(p)) {
-                    locationManager.requestLocationUpdates(p, 1000L, 2f, listener)
+                    locationManager.requestLocationUpdates(p, 1000L, 0f, listener)
                 }
             } catch (_: SecurityException) {}
         }
@@ -241,6 +243,15 @@ fun DeliveryHudView(
         refreshMapMarkers()
     }
 
+    LaunchedEffect(driverLat, driverLng) {
+        val lat = driverLat
+        val lng = driverLng
+        if (lat != null && lng != null && webViewRef != null) {
+            val js = "if (window.updateDriverLocation) { window.updateDriverLocation($lat, $lng); }"
+            webViewRef?.evaluateJavascript(js, null)
+        }
+    }
+
     // Bundled offline Leaflet assets
     val leafletCss = remember { MapAssetLoader.getLeafletCss(context) }
     val leafletJs = remember { MapAssetLoader.getLeafletJs(context) }
@@ -253,7 +264,8 @@ fun DeliveryHudView(
         // 1. Fullscreen Map (WebView with 100% Offline Bundled Leaflet)
         AndroidView(
             factory = { ctx ->
-                WebView(ctx).apply {
+                ResizableMapWebView(ctx).apply {
+                    setBackgroundColor(android.graphics.Color.parseColor("#E2E8F0"))
                     settings.apply {
                         javaScriptEnabled = true
                         domStorageEnabled = true
@@ -273,7 +285,19 @@ fun DeliveryHudView(
                             handler?.proceed()
                         }
                         override fun onPageFinished(view: WebView?, url: String?) {
+                            val lat = driverLat
+                            val lng = driverLng
+                            if (lat != null && lng != null) {
+                                view?.evaluateJavascript("if (window.updateDriverLocation) { window.updateDriverLocation($lat, $lng); }", null)
+                            }
                             refreshMapMarkers()
+                            view?.evaluateJavascript("if (window.map) { window.map.invalidateSize(); }", null)
+                            view?.postDelayed({
+                                view.evaluateJavascript("if (window.map) { window.map.invalidateSize(); }", null)
+                            }, 250)
+                            view?.postDelayed({
+                                view.evaluateJavascript("if (window.map) { window.map.invalidateSize(); }", null)
+                            }, 600)
                         }
                     }
 
@@ -302,7 +326,7 @@ fun DeliveryHudView(
                             <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
                             <style>
                                 $leafletCss
-                                html, body, #map { height: 100%; width: 100%; margin: 0; padding: 0; background: #1e293b; }
+                                html, body, #map { height: 100%; width: 100%; margin: 0; padding: 0; background: #e2e8f0; }
                                 .leaflet-control-attribution { display: none !important; }
                                 .stop-pin {
                                     border-radius: 50%;
@@ -348,15 +372,54 @@ fun DeliveryHudView(
                                     font-size: 11px;
                                     opacity: 0.7;
                                 }
+                                .driver-marker-wrapper {
+                                    position: relative;
+                                    width: 24px;
+                                    height: 24px;
+                                }
+                                .driver-dot {
+                                    position: absolute;
+                                    top: 2px;
+                                    left: 2px;
+                                    width: 20px;
+                                    height: 20px;
+                                    background: #0284c7;
+                                    border: 3px solid #ffffff;
+                                    border-radius: 50%;
+                                    box-shadow: 0 2px 6px rgba(0,0,0,0.4);
+                                    z-index: 10;
+                                }
+                                .driver-pulse {
+                                    position: absolute;
+                                    top: -10px;
+                                    left: -10px;
+                                    width: 44px;
+                                    height: 44px;
+                                    background: rgba(2, 132, 199, 0.35);
+                                    border-radius: 50%;
+                                    animation: driver-radar 1.8s infinite ease-out;
+                                    z-index: 5;
+                                }
+                                @keyframes driver-radar {
+                                    0% { transform: scale(0.4); opacity: 1; }
+                                    100% { transform: scale(1.6); opacity: 0; }
+                                }
                                 @keyframes pulse {
                                     0% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.8); }
                                     70% { box-shadow: 0 0 0 14px rgba(16, 185, 129, 0); }
                                     100% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0); }
                                 }
+                                @keyframes spin {
+                                    to { transform: rotate(360deg); }
+                                }
                             </style>
                         </head>
                         <body>
                             <div id="map"></div>
+                            <div id="map-loader" style="position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); z-index: 500; font-family: sans-serif; font-size: 14px; color: #64748b; font-weight: bold; text-align: center; pointer-events: none;">
+                                <div style="width: 32px; height: 32px; border: 3px solid #cbd5e1; border-top-color: #0d9488; border-radius: 50%; animation: spin 0.8s linear infinite; margin: 0 auto 8px;"></div>
+                                กำลังโหลดแผนที่...
+                            </div>
                             <script>
                                 $leafletJs
                             </script>
@@ -364,7 +427,7 @@ fun DeliveryHudView(
                                 var currentTileLayer = L.tileLayer('$initUrl', {
                                     maxZoom: $initMaxZoom,
                                     subdomains: '$initSubs',
-                                    errorTileUrl: ''
+                                    errorTileUrl: 'https://a.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png'
                                 });
 
                                 var map = L.map('map', {
@@ -372,6 +435,23 @@ fun DeliveryHudView(
                                     zoom: 17,
                                     zoomControl: false,
                                     layers: [currentTileLayer]
+                                });
+
+                                map.whenReady(function() {
+                                    var loader = document.getElementById('map-loader');
+                                    if (loader) loader.style.display = 'none';
+                                    map.invalidateSize();
+                                });
+
+                                setTimeout(function() { if (window.map) window.map.invalidateSize(); }, 150);
+                                setTimeout(function() { if (window.map) window.map.invalidateSize(); }, 400);
+                                setTimeout(function() { if (window.map) window.map.invalidateSize(); }, 1000);
+
+                                var driverIcon = L.divIcon({
+                                    className: 'driver-marker-wrapper',
+                                    html: '<div class="driver-pulse"></div><div class="driver-dot"></div>',
+                                    iconSize: [24, 24],
+                                    iconAnchor: [12, 12]
                                 });
 
                                 var driverMarker = null;
@@ -384,16 +464,22 @@ fun DeliveryHudView(
                                     }
                                     currentTileLayer = L.tileLayer(tileUrl, {
                                         maxZoom: maxZoom || 19,
-                                        subdomains: subdomains || '0123'
+                                        subdomains: subdomains || '0123',
+                                        errorTileUrl: 'https://a.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png'
                                     });
                                     map.addLayer(currentTileLayer);
+                                    if (window.map) window.map.invalidateSize();
                                 };
 
                                 window.centerOnLocation = function(lat, lng) {
-                                    map.setView([lat, lng], 17, { animate: true });
+                                    if (window.map) {
+                                        window.map.invalidateSize();
+                                        window.map.setView([lat, lng], 17, { animate: true });
+                                    }
                                 };
 
                                 window.fitAllMarkers = function() {
+                                    if (window.map) window.map.invalidateSize();
                                     if (markersLayer.getLayers().length > 0) {
                                         var group = new L.featureGroup(markersLayer.getLayers());
                                         if (driverMarker) group.addLayer(driverMarker);
@@ -402,26 +488,35 @@ fun DeliveryHudView(
                                 };
 
                                 window.updateDriverLocation = function(lat, lng) {
+                                    var loader = document.getElementById('map-loader');
+                                    if (loader) loader.style.display = 'none';
                                     if (!driverMarker) {
-                                        driverMarker = L.circleMarker([lat, lng], {
-                                            radius: 10,
-                                            fillColor: '#0ea5e9',
-                                            color: '#ffffff',
-                                            weight: 3,
-                                            opacity: 1,
-                                            fillOpacity: 0.9
+                                        driverMarker = L.marker([lat, lng], {
+                                            icon: driverIcon,
+                                            zIndexOffset: 1000
                                         }).addTo(map);
                                     } else {
                                         driverMarker.setLatLng([lat, lng]);
                                     }
+                                    if (window.map) {
+                                        window.map.invalidateSize();
+                                    }
                                 };
 
                                 window.renderDeliveryStops = function(stops, centerLat, centerLng) {
+                                    var loader = document.getElementById('map-loader');
+                                    if (loader) loader.style.display = 'none';
+                                    if (window.map) {
+                                        window.map.invalidateSize();
+                                    }
                                     markersLayer.clearLayers();
                                     var points = [];
 
                                     if (driverMarker) {
                                         points.push(driverMarker.getLatLng());
+                                    } else if (centerLat && centerLng) {
+                                        window.updateDriverLocation(centerLat, centerLng);
+                                        points.push([centerLat, centerLng]);
                                     }
 
                                     stops.forEach(function(s) {
@@ -433,7 +528,9 @@ fun DeliveryHudView(
 
                                         var icon = L.divIcon({
                                             className: pinClass,
-                                            html: '<span>' + s.order + '</span>'
+                                            html: '<span>' + s.order + '</span>',
+                                            iconSize: s.isTarget ? [38, 38] : (s.isNext ? [32, 32] : [28, 28]),
+                                            iconAnchor: s.isTarget ? [19, 19] : (s.isNext ? [16, 16] : [14, 14])
                                         });
 
                                         var marker = L.marker([s.lat, s.lng], { icon: icon });
@@ -451,12 +548,13 @@ fun DeliveryHudView(
 
                                     if (routeLine) {
                                         map.removeLayer(routeLine);
+                                        routeLine = null;
                                     }
                                     if (points.length >= 2) {
                                         routeLine = L.polyline(points, {
                                             color: '#10b981',
                                             weight: 4,
-                                            opacity: 0.8,
+                                            opacity: 0.85,
                                             dashArray: '8, 8'
                                         }).addTo(map);
                                     }
@@ -481,7 +579,8 @@ fun DeliveryHudView(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 14.dp, vertical = 24.dp)
+                .statusBarsPadding()
+                .padding(horizontal = 14.dp, vertical = 8.dp)
                 .align(Alignment.TopCenter)
         ) {
             // Warning if GPS is disabled on the phone
@@ -650,7 +749,8 @@ fun DeliveryHudView(
             Card(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 12.dp, vertical = 14.dp)
+                    .navigationBarsPadding()
+                    .padding(horizontal = 12.dp, vertical = 8.dp)
                     .align(Alignment.BottomCenter),
                 shape = RoundedCornerShape(20.dp),
                 colors = CardDefaults.cardColors(containerColor = Color(0xFA0F172A)),
@@ -865,6 +965,7 @@ fun DeliveryHudView(
             Card(
                 modifier = Modifier
                     .fillMaxWidth()
+                    .navigationBarsPadding()
                     .padding(16.dp)
                     .align(Alignment.Center),
                 shape = RoundedCornerShape(16.dp),
@@ -903,6 +1004,23 @@ fun DeliveryHudView(
                     }
                 }
             }
+        }
+    }
+}
+
+private class ResizableMapWebView(context: Context) : WebView(context) {
+    override fun onSizeChanged(w: Int, h: Int, ow: Int, oh: Int) {
+        super.onSizeChanged(w, h, ow, oh)
+        if (w > 0 && h > 0) {
+            post {
+                evaluateJavascript("if (window.map) { window.map.invalidateSize(); }", null)
+            }
+            postDelayed({
+                evaluateJavascript("if (window.map) { window.map.invalidateSize(); }", null)
+            }, 200)
+            postDelayed({
+                evaluateJavascript("if (window.map) { window.map.invalidateSize(); }", null)
+            }, 500)
         }
     }
 }

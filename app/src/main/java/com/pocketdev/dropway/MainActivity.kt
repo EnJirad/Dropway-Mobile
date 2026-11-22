@@ -67,77 +67,80 @@ fun MainApp(
     sharingManager: SharingManager
 ) {
     var currentTab by remember { mutableStateOf(ScreenTab.HOUSES) }
+    var isHudActive by remember { mutableStateOf(false) }
 
     Scaffold(
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
         bottomBar = {
-            NavigationBar(
-                containerColor = SurfaceCard,
-                tonalElevation = 4.dp
-            ) {
-                // 1. คลังบ้าน
-                NavigationBarItem(
-                    selected = (currentTab == ScreenTab.HOUSES),
-                    onClick = { currentTab = ScreenTab.HOUSES },
-                    icon = { Icon(Icons.Default.Home, contentDescription = "คลังบ้าน") },
-                    label = { Text("คลังบ้าน") },
-                    colors = NavigationBarItemDefaults.colors(
-                        selectedIconColor = TealDark,
-                        selectedTextColor = TealDark,
-                        indicatorColor = TealContainer,
-                        unselectedIconColor = TextSecondary,
-                        unselectedTextColor = TextSecondary
+            if (!isHudActive) {
+                NavigationBar(
+                    containerColor = SurfaceCard,
+                    tonalElevation = 4.dp
+                ) {
+                    // 1. คลังบ้าน
+                    NavigationBarItem(
+                        selected = (currentTab == ScreenTab.HOUSES),
+                        onClick = { currentTab = ScreenTab.HOUSES },
+                        icon = { Icon(Icons.Default.Home, contentDescription = "คลังบ้าน") },
+                        label = { Text("คลังบ้าน") },
+                        colors = NavigationBarItemDefaults.colors(
+                            selectedIconColor = TealDark,
+                            selectedTextColor = TealDark,
+                            indicatorColor = TealContainer,
+                            unselectedIconColor = TextSecondary,
+                            unselectedTextColor = TextSecondary
+                        )
                     )
-                )
-                // 2. สแกน
-                NavigationBarItem(
-                    selected = (currentTab == ScreenTab.SCAN),
-                    onClick = { currentTab = ScreenTab.SCAN },
-                    icon = { Icon(Icons.Default.Search, contentDescription = "สแกน") },
-                    label = { Text("สแกน") },
-                    colors = NavigationBarItemDefaults.colors(
-                        selectedIconColor = TealDark,
-                        selectedTextColor = TealDark,
-                        indicatorColor = TealContainer,
-                        unselectedIconColor = TextSecondary,
-                        unselectedTextColor = TextSecondary
+                    // 2. สแกน
+                    NavigationBarItem(
+                        selected = (currentTab == ScreenTab.SCAN),
+                        onClick = { currentTab = ScreenTab.SCAN },
+                        icon = { Icon(Icons.Default.Search, contentDescription = "สแกน") },
+                        label = { Text("สแกน") },
+                        colors = NavigationBarItemDefaults.colors(
+                            selectedIconColor = TealDark,
+                            selectedTextColor = TealDark,
+                            indicatorColor = TealContainer,
+                            unselectedIconColor = TextSecondary,
+                            unselectedTextColor = TextSecondary
+                        )
                     )
-                )
-                // 3. นำทาง
-                NavigationBarItem(
-                    selected = (currentTab == ScreenTab.NAVIGATION),
-                    onClick = { currentTab = ScreenTab.NAVIGATION },
-                    icon = { Icon(Icons.Default.LocationOn, contentDescription = "นำทาง") },
-                    label = { Text("นำทาง") },
-                    colors = NavigationBarItemDefaults.colors(
-                        selectedIconColor = TealDark,
-                        selectedTextColor = TealDark,
-                        indicatorColor = TealContainer,
-                        unselectedIconColor = TextSecondary,
-                        unselectedTextColor = TextSecondary
+                    // 3. นำทาง
+                    NavigationBarItem(
+                        selected = (currentTab == ScreenTab.NAVIGATION),
+                        onClick = { currentTab = ScreenTab.NAVIGATION },
+                        icon = { Icon(Icons.Default.LocationOn, contentDescription = "นำทาง") },
+                        label = { Text("นำทาง") },
+                        colors = NavigationBarItemDefaults.colors(
+                            selectedIconColor = TealDark,
+                            selectedTextColor = TealDark,
+                            indicatorColor = TealContainer,
+                            unselectedIconColor = TextSecondary,
+                            unselectedTextColor = TextSecondary
+                        )
                     )
-                )
-                // 4. ตั้งค่า
-                NavigationBarItem(
-                    selected = (currentTab == ScreenTab.SETTINGS),
-                    onClick = { currentTab = ScreenTab.SETTINGS },
-                    icon = { Icon(Icons.Default.Settings, contentDescription = "ตั้งค่า") },
-                    label = { Text("ตั้งค่า") },
-                    colors = NavigationBarItemDefaults.colors(
-                        selectedIconColor = TealDark,
-                        selectedTextColor = TealDark,
-                        indicatorColor = TealContainer,
-                        unselectedIconColor = TextSecondary,
-                        unselectedTextColor = TextSecondary
+                    // 4. ตั้งค่า
+                    NavigationBarItem(
+                        selected = (currentTab == ScreenTab.SETTINGS),
+                        onClick = { currentTab = ScreenTab.SETTINGS },
+                        icon = { Icon(Icons.Default.Settings, contentDescription = "ตั้งค่า") },
+                        label = { Text("ตั้งค่า") },
+                        colors = NavigationBarItemDefaults.colors(
+                            selectedIconColor = TealDark,
+                            selectedTextColor = TealDark,
+                            indicatorColor = TealContainer,
+                            unselectedIconColor = TextSecondary,
+                            unselectedTextColor = TextSecondary
+                        )
                     )
-                )
+                }
             }
         }
     ) { innerPadding ->
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(bottom = innerPadding.calculateBottomPadding())
+                .padding(bottom = if (isHudActive) 0.dp else innerPadding.calculateBottomPadding())
         ) {
             // Tab Content
             when (currentTab) {
@@ -162,7 +165,8 @@ fun MainApp(
                     NavigationScreen(
                         houseRepo = houseRepo,
                         prefs = prefs,
-                        onNavigateToSettings = { currentTab = ScreenTab.SETTINGS }
+                        onNavigateToSettings = { currentTab = ScreenTab.SETTINGS },
+                        onHudVisibilityChanged = { active -> isHudActive = active }
                     )
                 }
                 ScreenTab.SETTINGS -> {

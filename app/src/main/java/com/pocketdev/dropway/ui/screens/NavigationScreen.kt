@@ -38,7 +38,8 @@ import kotlinx.coroutines.launch
 fun NavigationScreen(
     houseRepo: LocalHouseRepository,
     prefs: PreferencesManager,
-    onNavigateToSettings: () -> Unit
+    onNavigateToSettings: () -> Unit,
+    onHudVisibilityChanged: (Boolean) -> Unit = {}
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -49,6 +50,10 @@ fun NavigationScreen(
     var selectedFilter by remember { mutableStateOf("pending") } // "all", "pending", "delivered", "reported"
     var searchQuery by remember { mutableStateOf("") }
     var isHudMode by remember { mutableStateOf(false) }
+
+    LaunchedEffect(isHudMode) {
+        onHudVisibilityChanged(isHudMode)
+    }
 
     // Dialog states
     var reportingStop by remember { mutableStateOf<NavigationHouse?>(null) }

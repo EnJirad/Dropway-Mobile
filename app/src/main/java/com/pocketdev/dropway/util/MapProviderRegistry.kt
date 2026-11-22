@@ -11,7 +11,7 @@ data class MapProvider(
 )
 
 object MapProviderRegistry {
-    const val DEFAULT_PROVIDER_ID = "google_satellite"
+    const val DEFAULT_PROVIDER_ID = "google_hybrid"
 
     val PROVIDERS: List<MapProvider> = listOf(
         // 1. Satellite Group
