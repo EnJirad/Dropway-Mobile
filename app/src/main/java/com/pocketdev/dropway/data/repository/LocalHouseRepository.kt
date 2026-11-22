@@ -119,6 +119,54 @@ class LocalHouseRepository(
         }
     }
 
+    /**
+     * Reorders navigation stops in the database based on ordered navId list.
+     */
+    suspend fun reorderNavigationStops(orderedNavIds: List<String>): Result<Boolean> = withContext(Dispatchers.IO) {
+        runCatching {
+            localDb.updateNavigationPriorities(orderedNavIds)
+        }
+    }
+
+    /**
+     * Optimizes navigation stops order using Nearest-Neighbor TSP algorithm from current coordinates.
+     */
+    suspend fun optimizeNavigationRoute(startLat: Double?, startLng: Double?): Result<com.pocketdev.dropway.util.RouteOptimizer.OptimizationResult> = withContext(Dispatchers.Default) {
+        runCatching {
+            val stops = localDb.getNavigationStops(prefs.userId)
+            val result = com.pocketdev.dropway.util.RouteOptimizer.optimize(startLat, startLng, stops)
+            // Persist the new sequence in the local database
+            val orderedIds = result.optimizedStops.map { it.navId }
+            localDb.updateNavigationPriorities(orderedIds)
+            result
+        }
+    }
+
+    /**
+     * Imports houses from Map Marker KML, KMZ, or CSV.
+     */
+    suspend fun importFromMapMarker(
+        inputStream: java.io.InputStream,
+        filename: String
+    ): Result<com.pocketdev.dropway.util.MapMarkerImporter.ImportSummary> = withContext(Dispatchers.IO) {
+        runCatching {
+            val summary = com.pocketdev.dropway.util.MapMarkerImporter.parse(
+                inputStream = inputStream,
+                filename = filename,
+                creatorId = prefs.userId,
+                creatorName = prefs.driverName
+            )
+            if (summary.validHouses.isNotEmpty()) {
+                localDb.batchUpsertHouses(
+                    houses = summary.validHouses,
+                    creatorId = prefs.userId,
+                    creatorName = prefs.driverName
+                )
+            }
+            summary
+        }
+    }
+
     // -----------------------------------------------------------------------------------------
     // Proprietary .dwv Encrypted Sharing Container
     // -----------------------------------------------------------------------------------------

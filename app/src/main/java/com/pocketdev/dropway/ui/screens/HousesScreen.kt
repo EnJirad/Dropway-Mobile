@@ -31,9 +31,11 @@ import com.pocketdev.dropway.data.sharing.SharingManager
 import com.pocketdev.dropway.data.sharing.VaultMetadata
 import com.pocketdev.dropway.ui.components.AddEditHouseDialog
 import com.pocketdev.dropway.ui.components.AddToQueueDialog
+import com.pocketdev.dropway.ui.components.BlockingLoader
 import com.pocketdev.dropway.ui.components.ConfirmActionDialog
 import com.pocketdev.dropway.ui.theme.*
 import com.pocketdev.dropway.util.DriverActions
+import com.pocketdev.dropway.util.MapMarkerImporter
 import com.pocketdev.dropway.util.SearchMatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -66,6 +68,8 @@ fun HousesScreen(
     var addingToQueueHouse by remember { mutableStateOf<House?>(null) }
     var pendingPaywallMeta by remember { mutableStateOf<VaultMetadata?>(null) }
     var pendingImportBytes by remember { mutableStateOf<ByteArray?>(null) }
+    var importSummaryDialog by remember { mutableStateOf<MapMarkerImporter.ImportSummary?>(null) }
+    var isImportingMapMarker by remember { mutableStateOf(false) }
 
     fun loadHouses() {
         isLoading = true
@@ -114,6 +118,39 @@ fun HousesScreen(
                     }
                 } catch (e: Exception) {
                     Toast.makeText(context, "เกิดข้อผิดพลาด: ${e.message}", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+    }
+
+    val mapMarkerPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            scope.launch {
+                isImportingMapMarker = true
+                try {
+                    var displayName = "markers.kml"
+                    context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+                        val nameIdx = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+                        if (nameIdx >= 0 && cursor.moveToFirst()) {
+                            displayName = cursor.getString(nameIdx)
+                        }
+                    }
+                    val inputStream = context.contentResolver.openInputStream(uri)
+                    if (inputStream != null) {
+                        val res = houseRepo.importFromMapMarker(inputStream, displayName)
+                        res.onSuccess { summary ->
+                            importSummaryDialog = summary
+                            loadHouses()
+                        }.onFailure {
+                            Toast.makeText(context, "นำเข้าไม่สำเร็จ: ${it.message}", Toast.LENGTH_LONG).show()
+                        }
+                    }
+                } catch (e: Exception) {
+                    Toast.makeText(context, "เกิดข้อผิดพลาด: ${e.message}", Toast.LENGTH_SHORT).show()
+                } finally {
+                    isImportingMapMarker = false
                 }
             }
         }
@@ -227,6 +264,10 @@ fun HousesScreen(
                         }
                     ) {
                         Icon(Icons.Default.Share, contentDescription = "แชร์คลังบ้าน (.dwv)", tint = TextSecondary)
+                    }
+                    // Import from Map Marker (KML/KMZ/CSV)
+                    IconButton(onClick = { mapMarkerPickerLauncher.launch("*/*") }) {
+                        Icon(Icons.Default.Place, contentDescription = "นำเข้า Map Marker (KML/KMZ/CSV)", tint = TealPrimary)
                     }
                     // Import .dwv (Encrypted Vault)
                     IconButton(onClick = { dwvPickerLauncher.launch("*/*") }) {
@@ -556,6 +597,44 @@ fun HousesScreen(
             }
         )
     }
+
+    // Map Marker Import Summary Dialog
+    importSummaryDialog?.let { summary ->
+        AlertDialog(
+            onDismissRequest = { importSummaryDialog = null },
+            icon = {
+                Icon(Icons.Default.CheckCircle, contentDescription = null, tint = StatusDelivered, modifier = Modifier.size(32.dp))
+            },
+            title = {
+                Text("นำเข้า Map Marker สำเร็จ", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+            },
+            text = {
+                Column {
+                    Text("ไฟล์: ${summary.filename}", fontSize = 12.sp, color = TextSecondary)
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text("เพิ่มบ้านและพิกัดเข้าคลัง: ${summary.validHouses.size} หลัง", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = TextPrimary)
+                    if (summary.skippedCount > 0) {
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text("ข้ามรายการที่ไม่มีพิกัด/ข้อมูล: ${summary.skippedCount} รายการ", fontSize = 12.sp, color = TextMuted)
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = { importSummaryDialog = null },
+                    colors = ButtonDefaults.buttonColors(containerColor = TealPrimary)
+                ) {
+                    Text("ตกลง")
+                }
+            }
+        )
+    }
+
+    BlockingLoader(
+        open = isImportingMapMarker,
+        title = "นำเข้าพิกัดจาก Map Marker",
+        message = "กำลังประมวลผลไฟล์และบันทึกคลังบ้านในเครื่อง..."
+    )
 }
 
 @Composable

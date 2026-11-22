@@ -6,14 +6,14 @@ package com.pocketdev.dropway.data.sharing
  */
 object SubscriptionConfig {
     /**
-     * Target monthly sharing subscription price in Thai Baht (THB 20–30 range).
+     * Target monthly pro subscription price in Thai Baht (99 THB / month).
      */
-    var monthlyPriceThb: Int = 29
+    var monthlyPriceThb: Int = 99
     var currencyCode: String = "THB"
 
-    const val PLAN_ID = "dropway_vault_sharing_monthly"
-    const val PLAN_TITLE = "Dropway Vault Sharing (แชร์คลังบ้าน)"
-    const val PLAN_DESCRIPTION = "แชร์คลังบ้านและพิกัดส่งพัสดุระหว่างคนขับแบบเข้ารหัสและปลอดภัย"
+    const val PLAN_ID = "dropway_pro_monthly"
+    const val PLAN_TITLE = "Dropway Pro (ส่งพัสดุอัจฉริยะ)"
+    const val PLAN_DESCRIPTION = "ปลดล็อกคลังบ้านไม่จำกัด, โหมดขับรถ HUD นำทางสด, นำเข้า Map Marker KML และจัดเรียงเส้นทางอัตโนมัติ"
 
     fun getFormattedPrice(): String {
         return "$monthlyPriceThb $currencyCode / เดือน"

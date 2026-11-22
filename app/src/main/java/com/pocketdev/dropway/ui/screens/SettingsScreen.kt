@@ -262,7 +262,7 @@ fun SettingsScreen(
                     }
 
                     Text(
-                        "ค่าบริการ: ${SubscriptionConfig.monthlyPriceThb} บาท/เดือน สำหรับปลดล็อกการนำเข้าคลังบ้านที่เพื่อนร่วมงานแชร์มา และใช้งานแผนที่ดาวเทียมทุกประเภท",
+                        "ค่าบริการ: ${SubscriptionConfig.monthlyPriceThb} บาท/เดือน (ตกวันละ ~3.3 บาท) สำหรับปลดล็อกคลังบ้านไม่จำกัด, โหมดขับรถ HUD นำทางสด, นำเข้า Map Marker (KML/KMZ) และระบบจัดเรียงเส้นทางอัตโนมัติ",
                         fontSize = 12.sp,
                         color = TextSecondary
                     )

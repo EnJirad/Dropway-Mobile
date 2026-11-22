@@ -506,6 +506,52 @@ class LocalHouseDatabase(private val context: Context) :
         return result
     }
 
+    /**
+     * Batch upserts a list of houses within a single SQLite transaction.
+     * Ideal for Map Marker KML/KMZ/CSV imports of hundreds/thousands of records.
+     */
+    fun batchUpsertHouses(houses: List<House>, creatorId: String? = null, creatorName: String? = null): Int {
+        val db = writableDatabase
+        db.beginTransaction()
+        var count = 0
+        try {
+            val now = nowIso()
+            for (house in houses) {
+                val cv = ContentValues().apply {
+                    put(COL_ID, house.id)
+                    put(COL_FULL_NAME, house.fullName)
+                    put(COL_PHONE, house.phone)
+                    put(COL_ADDRESS, house.address)
+                    put(COL_LAT, house.lat)
+                    put(COL_LNG, house.lng)
+                    put(COL_NOTE, house.note)
+                    put(COL_QUANTITY, house.quantity)
+                    put(COL_CREATOR_ID, house.creatorId ?: creatorId)
+                    put(COL_CREATOR_NAME, house.creatorName ?: creatorName)
+                    put(COL_SOURCE_TYPE, house.sourceType)
+                    put(COL_IS_SHARED, if (house.isShared) 1 else 0)
+                    put(COL_SHARE_TOKEN, house.shareToken)
+                    put(COL_SHARED_BY_USER_ID, house.sharedByUserId)
+                    put(COL_EXPIRES_AT, house.expiresAt)
+                    put(COL_RECORD_VERSION, house.recordVersion)
+                    put(COL_CREATED_AT, house.createdAt ?: now)
+                    put(COL_UPDATED_AT, now)
+                    put(COL_IS_DELETED, 0)
+                    put(COL_SYNC_STATUS, "SYNCED")
+                }
+                val rowId = db.insertWithOnConflict(TABLE_HOUSES, null, cv, SQLiteDatabase.CONFLICT_REPLACE)
+                if (rowId > 0) {
+                    assignHouseToFolder(Folder.DEFAULT_FOLDER_ID, house.id)
+                    count++
+                }
+            }
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+        return count
+    }
+
     fun deleteHouse(id: String): Int {
         val db = writableDatabase
         val cv = ContentValues().apply {
@@ -999,6 +1045,26 @@ class LocalHouseDatabase(private val context: Context) :
             put(COL_DRIVER_NOTE, note)
         }
         return db.update(TABLE_NAVIGATION_STOPS, cv, "$COL_NAV_ID = ?", arrayOf(navId)) > 0
+    }
+
+    /**
+     * Updates the sequential priority order of navigation stops in a single transaction.
+     */
+    fun updateNavigationPriorities(orderedNavIds: List<String>): Boolean {
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            val cv = ContentValues()
+            orderedNavIds.forEachIndexed { index, navId ->
+                cv.clear()
+                cv.put(COL_NAV_PRIORITY, index + 1)
+                db.update(TABLE_NAVIGATION_STOPS, cv, "$COL_NAV_ID = ?", arrayOf(navId))
+            }
+            db.setTransactionSuccessful()
+            return true
+        } finally {
+            db.endTransaction()
+        }
     }
 
     fun deleteNavigationStop(navId: String): Boolean {

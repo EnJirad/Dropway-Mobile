@@ -30,6 +30,31 @@ object CoordinateHelper {
     }
 
     /**
+     * Calculates distance in meters between two geographical points using the Haversine formula.
+     */
+    fun distanceMeters(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
+        val r = 6371000.0 // Earth's radius in meters
+        val dLat = Math.toRadians(lat2 - lat1)
+        val dLon = Math.toRadians(lon2 - lon1)
+        val a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+                Math.cos(Math.toRadians(lat1)) * Math.cos(Math.toRadians(lat2)) *
+                Math.sin(dLon / 2) * Math.sin(dLon / 2)
+        val c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
+        return r * c
+    }
+
+    /**
+     * Formats distance in meters to a human-readable Thai string (e.g. "45 ม." or "1.2 กม.").
+     */
+    fun formatDistance(meters: Double): String {
+        return if (meters < 1000) {
+            "${meters.toInt()} ม."
+        } else {
+            String.format(Locale.US, "%.1f กม.", meters / 1000.0)
+        }
+    }
+
+    /**
      * Validates whether a coordinate string is valid.
      */
     fun isValid(input: String?): Boolean {

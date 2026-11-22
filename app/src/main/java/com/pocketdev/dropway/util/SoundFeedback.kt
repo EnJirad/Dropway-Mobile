@@ -55,6 +55,16 @@ object SoundFeedback {
         } catch (_: Exception) {}
     }
 
+    /**
+     * เสียงแจ้งเตือนเข้าใกล้จุดส่ง (Proximity Alert): เมื่อคนขับเข้าใกล้บ้านเป้าหมายในรัศมี 50-70 เมตร
+     */
+    fun playProximityAlert(context: Context) {
+        try {
+            getToneGenerator()?.startTone(ToneGenerator.TONE_PROP_PROMPT, 180)
+            vibrate(context, 120)
+        } catch (_: Exception) {}
+    }
+
     private fun vibrate(context: Context, durationMs: Long) {
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {

@@ -24,11 +24,13 @@ import com.pocketdev.dropway.data.local.PreferencesManager
 import com.pocketdev.dropway.data.model.NavigationHouse
 import com.pocketdev.dropway.data.repository.LocalHouseRepository
 import com.pocketdev.dropway.ui.components.ConfirmActionDialog
+import com.pocketdev.dropway.ui.components.DeliveryHudView
 import com.pocketdev.dropway.ui.components.DeliveryStatusBadge
 import com.pocketdev.dropway.ui.components.EditDriverNoteDialog
 import com.pocketdev.dropway.ui.components.ReportProblemDialog
 import com.pocketdev.dropway.ui.theme.*
 import com.pocketdev.dropway.util.DriverActions
+import com.pocketdev.dropway.util.SoundFeedback
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -46,6 +48,7 @@ fun NavigationScreen(
     var errorMessage by remember { mutableStateOf<String?>(null) }
     var selectedFilter by remember { mutableStateOf("pending") } // "all", "pending", "delivered", "reported"
     var searchQuery by remember { mutableStateOf("") }
+    var isHudMode by remember { mutableStateOf(false) }
 
     // Dialog states
     var reportingStop by remember { mutableStateOf<NavigationHouse?>(null) }
@@ -98,218 +101,268 @@ fun NavigationScreen(
     val reportedCount = stops.count { it.deliveryStatus.lowercase() == "reported" }
     val pendingCount = stops.count { it.deliveryStatus.lowercase() == "pending" }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = {
-                    Column {
-                        Text("คิวจัดส่งและนำทาง", fontWeight = FontWeight.Bold, fontSize = 18.sp)
-                        Text(
-                            "โหมดคนขับ: ${if (prefs.handMode == "left") "มือซ้าย" else "มือขวา"}",
-                            fontSize = 11.sp,
-                            color = TextMuted
-                        )
-                    }
-                },
-                actions = {
-                    IconButton(onClick = { loadStops() }) {
-                        Icon(Icons.Default.Refresh, contentDescription = "รีเฟรช")
-                    }
-                    IconButton(onClick = { showClearDeliveredConfirm = true }) {
-                        Icon(Icons.Default.Check, contentDescription = "ล้างที่ส่งแล้ว", tint = StatusDelivered)
-                    }
-                    IconButton(onClick = { showClearAllConfirm = true }) {
-                        Icon(Icons.Default.Delete, contentDescription = "ล้างคิวทั้งหมด", tint = StatusReported)
+    if (isHudMode) {
+        DeliveryHudView(
+            stops = stops,
+            onCloseHud = { isHudMode = false },
+            onMarkDelivered = { stop ->
+                scope.launch {
+                    val res = houseRepo.updateDeliveryStatus(stop.navId, "delivered")
+                    res.onSuccess {
+                        SoundFeedback.playSuccessSound(context)
+                        loadStops()
                     }
                 }
-            )
-        }
-    ) { padding ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(padding)
-                .background(NeutralBackground)
-        ) {
-            // Stats summary bar
-            Card(
+            },
+            onReportProblem = { stop ->
+                reportingStop = stop
+            },
+            onOptimizeRoute = { lat, lng ->
+                scope.launch {
+                    val res = houseRepo.optimizeNavigationRoute(lat, lng)
+                    res.onSuccess {
+                        loadStops()
+                    }
+                }
+            },
+            onSelectStop = {}
+        )
+    } else {
+        Scaffold(
+            topBar = {
+                TopAppBar(
+                    title = {
+                        Column {
+                            Text("คิวจัดส่งและนำทาง", fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                            Text(
+                                "โหมดคนขับ: ${if (prefs.handMode == "left") "มือซ้าย" else "มือขวา"}",
+                                fontSize = 11.sp,
+                                color = TextMuted
+                            )
+                        }
+                    },
+                    actions = {
+                        Button(
+                            onClick = { isHudMode = true },
+                            colors = ButtonDefaults.buttonColors(containerColor = TealPrimary),
+                            shape = RoundedCornerShape(8.dp),
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                            modifier = Modifier.padding(end = 4.dp)
+                        ) {
+                            Icon(Icons.Default.Place, contentDescription = null, tint = Color.White, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("โหมด HUD", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = Color.White)
+                        }
+                        IconButton(onClick = {
+                            scope.launch {
+                                val res = houseRepo.optimizeNavigationRoute(null, null)
+                                res.onSuccess {
+                                    Toast.makeText(context, "จัดเรียงลำดับเส้นทางใกล้สุดสำเร็จ", Toast.LENGTH_SHORT).show()
+                                    loadStops()
+                                }
+                            }
+                        }) {
+                            Icon(Icons.Default.PlayArrow, contentDescription = "จัดเรียงเส้นทาง", tint = TealPrimary)
+                        }
+                        IconButton(onClick = { loadStops() }) {
+                            Icon(Icons.Default.Refresh, contentDescription = "รีเฟรช")
+                        }
+                        IconButton(onClick = { showClearDeliveredConfirm = true }) {
+                            Icon(Icons.Default.Check, contentDescription = "ล้างที่ส่งแล้ว", tint = StatusDelivered)
+                        }
+                        IconButton(onClick = { showClearAllConfirm = true }) {
+                            Icon(Icons.Default.Delete, contentDescription = "ล้างคิวทั้งหมด", tint = StatusReported)
+                        }
+                    }
+                )
+            }
+        ) { padding ->
+            Column(
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 12.dp, vertical = 6.dp),
-                shape = RoundedCornerShape(12.dp),
-                colors = CardDefaults.cardColors(containerColor = SurfaceCard)
+                    .fillMaxSize()
+                    .padding(padding)
+                    .background(NeutralBackground)
             ) {
+                // Stats summary bar
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 6.dp),
+                    shape = RoundedCornerShape(12.dp),
+                    colors = CardDefaults.cardColors(containerColor = SurfaceCard)
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 10.dp, horizontal = 12.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text("ทั้งหมด", fontSize = 11.sp, color = TextMuted)
+                            Text("$totalCount", fontWeight = FontWeight.Bold, fontSize = 18.sp, color = TextPrimary)
+                        }
+                        Divider(modifier = Modifier.height(24.dp).width(1.dp), color = BorderOutline)
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text("รอดำเนินการ", fontSize = 11.sp, color = StatusPending)
+                            Text("$pendingCount", fontWeight = FontWeight.Bold, fontSize = 18.sp, color = StatusPending)
+                        }
+                        Divider(modifier = Modifier.height(24.dp).width(1.dp), color = BorderOutline)
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text("ส่งแล้ว", fontSize = 11.sp, color = StatusDelivered)
+                            Text("$deliveredCount", fontWeight = FontWeight.Bold, fontSize = 18.sp, color = StatusDelivered)
+                        }
+                        Divider(modifier = Modifier.height(24.dp).width(1.dp), color = BorderOutline)
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text("มีปัญหา", fontSize = 11.sp, color = StatusReported)
+                            Text("$reportedCount", fontWeight = FontWeight.Bold, fontSize = 18.sp, color = StatusReported)
+                        }
+                    }
+                }
+
+                // Filter Tabs
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(vertical = 10.dp, horizontal = 12.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
+                        .padding(horizontal = 12.dp, vertical = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text("ทั้งหมด", fontSize = 11.sp, color = TextMuted)
-                        Text("$totalCount", fontWeight = FontWeight.Bold, fontSize = 18.sp, color = TextPrimary)
-                    }
-                    Divider(modifier = Modifier.height(24.dp).width(1.dp), color = BorderOutline)
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text("รอดำเนินการ", fontSize = 11.sp, color = StatusPending)
-                        Text("$pendingCount", fontWeight = FontWeight.Bold, fontSize = 18.sp, color = StatusPending)
-                    }
-                    Divider(modifier = Modifier.height(24.dp).width(1.dp), color = BorderOutline)
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text("ส่งแล้ว", fontSize = 11.sp, color = StatusDelivered)
-                        Text("$deliveredCount", fontWeight = FontWeight.Bold, fontSize = 18.sp, color = StatusDelivered)
-                    }
-                    Divider(modifier = Modifier.height(24.dp).width(1.dp), color = BorderOutline)
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text("มีปัญหา", fontSize = 11.sp, color = StatusReported)
-                        Text("$reportedCount", fontWeight = FontWeight.Bold, fontSize = 18.sp, color = StatusReported)
+                    val filters = listOf(
+                        "pending" to "รอดำเนินการ ($pendingCount)",
+                        "all" to "ทั้งหมด ($totalCount)",
+                        "delivered" to "ส่งแล้ว ($deliveredCount)",
+                        "reported" to "มีปัญหา ($reportedCount)"
+                    )
+                    filters.forEach { (key, label) ->
+                        val isSelected = selectedFilter == key
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(if (isSelected) TealPrimary else SurfaceCard)
+                                .clickable { selectedFilter = key }
+                                .padding(horizontal = 10.dp, vertical = 6.dp)
+                        ) {
+                            Text(
+                                text = label,
+                                fontSize = 12.sp,
+                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                                color = if (isSelected) Color.White else TextSecondary
+                            )
+                        }
                     }
                 }
-            }
 
-            // Filter Tabs
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 12.dp, vertical = 4.dp),
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                val filters = listOf(
-                    "pending" to "รอดำเนินการ ($pendingCount)",
-                    "all" to "ทั้งหมด ($totalCount)",
-                    "delivered" to "ส่งแล้ว ($deliveredCount)",
-                    "reported" to "มีปัญหา ($reportedCount)"
+                // Search input
+                OutlinedTextField(
+                    value = searchQuery,
+                    onValueChange = { searchQuery = it },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 4.dp),
+                    placeholder = { Text("ค้นหาในคิว (ชื่อ, เบอร์, เลขพัสดุ, ที่อยู่)...", fontSize = 13.sp) },
+                    leadingIcon = { Icon(Icons.Default.Search, contentDescription = null, tint = TextMuted) },
+                    trailingIcon = {
+                        if (searchQuery.isNotEmpty()) {
+                            IconButton(onClick = { searchQuery = "" }) {
+                                Icon(Icons.Default.Close, contentDescription = "ล้าง")
+                            }
+                        }
+                    },
+                    singleLine = true,
+                    shape = RoundedCornerShape(10.dp)
                 )
-                filters.forEach { (key, label) ->
-                    val isSelected = selectedFilter == key
+
+                // Content
+                if (isLoading) {
+                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        CircularProgressIndicator(color = TealPrimary)
+                    }
+                } else if (errorMessage != null) {
                     Box(
                         modifier = Modifier
-                            .clip(RoundedCornerShape(8.dp))
-                            .background(if (isSelected) TealPrimary else SurfaceCard)
-                            .clickable { selectedFilter = key }
-                            .padding(horizontal = 10.dp, vertical = 6.dp)
+                            .fillMaxSize()
+                            .padding(24.dp),
+                        contentAlignment = Alignment.Center
                     ) {
-                        Text(
-                            text = label,
-                            fontSize = 12.sp,
-                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
-                            color = if (isSelected) Color.White else TextSecondary
-                        )
-                    }
-                }
-            }
-
-            // Search input
-            OutlinedTextField(
-                value = searchQuery,
-                onValueChange = { searchQuery = it },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 12.dp, vertical = 4.dp),
-                placeholder = { Text("ค้นหาในคิว (ชื่อ, เบอร์, เลขพัสดุ, ที่อยู่)...", fontSize = 13.sp) },
-                leadingIcon = { Icon(Icons.Default.Search, contentDescription = null, tint = TextMuted) },
-                trailingIcon = {
-                    if (searchQuery.isNotEmpty()) {
-                        IconButton(onClick = { searchQuery = "" }) {
-                            Icon(Icons.Default.Close, contentDescription = "ล้าง")
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Icon(Icons.Default.Warning, contentDescription = null, tint = StatusReported, modifier = Modifier.size(48.dp))
+                            Spacer(modifier = Modifier.height(12.dp))
+                            Text(errorMessage ?: "", color = TextSecondary, fontSize = 14.sp)
+                            Spacer(modifier = Modifier.height(16.dp))
+                            Button(onClick = onNavigateToSettings) {
+                                Text("ไปหน้าตั้งค่า Neon")
+                            }
                         }
                     }
-                },
-                singleLine = true,
-                shape = RoundedCornerShape(10.dp)
-            )
-
-            // Content
-            if (isLoading) {
-                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    CircularProgressIndicator(color = TealPrimary)
-                }
-            } else if (errorMessage != null) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(24.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Icon(Icons.Default.Warning, contentDescription = null, tint = StatusReported, modifier = Modifier.size(48.dp))
-                        Spacer(modifier = Modifier.height(12.dp))
-                        Text(errorMessage ?: "", color = TextSecondary, fontSize = 14.sp)
-                        Spacer(modifier = Modifier.height(16.dp))
-                        Button(onClick = onNavigateToSettings) {
-                            Text("ไปหน้าตั้งค่า Neon")
+                } else if (filteredStops.isEmpty()) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(24.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Icon(Icons.Default.Home, contentDescription = null, tint = TextMuted, modifier = Modifier.size(56.dp))
+                            Spacer(modifier = Modifier.height(12.dp))
+                            Text(
+                                if (searchQuery.isNotEmpty()) "ไม่พบรายการที่ตรงกับ '$searchQuery'"
+                                else if (selectedFilter == "pending") "ไม่มีพัสดุค้างส่ง เยี่ยมมาก!"
+                                else "ยังไม่มีจุดส่งในคิว",
+                                fontWeight = FontWeight.Medium,
+                                color = TextSecondary
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text("เพิ่มจุดส่งจากแท็บ 'คลังบ้าน' หรือ 'สแกน' ได้ทันที", fontSize = 12.sp, color = TextMuted)
                         }
                     }
-                }
-            } else if (filteredStops.isEmpty()) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(24.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Icon(Icons.Default.Home, contentDescription = null, tint = TextMuted, modifier = Modifier.size(56.dp))
-                        Spacer(modifier = Modifier.height(12.dp))
-                        Text(
-                            if (searchQuery.isNotEmpty()) "ไม่พบรายการที่ตรงกับ '$searchQuery'"
-                            else if (selectedFilter == "pending") "ไม่มีพัสดุค้างส่ง เยี่ยมมาก!"
-                            else "ยังไม่มีจุดส่งในคิว",
-                            fontWeight = FontWeight.Medium,
-                            color = TextSecondary
-                        )
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text("เพิ่มจุดส่งจากแท็บ 'คลังบ้าน' หรือ 'สแกน' ได้ทันที", fontSize = 12.sp, color = TextMuted)
-                    }
-                }
-            } else {
-                LazyColumn(
-                    modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    itemsIndexed(filteredStops, key = { _, item -> item.navId }) { index, stop ->
-                        DeliveryStopCard(
-                            stop = stop,
-                            stopIndex = index + 1,
-                            handMode = prefs.handMode,
-                            onNavigate = {
-                                DriverActions.openMapNavigation(
-                                    context,
-                                    stop.lat,
-                                    stop.lng,
-                                    stop.address,
-                                    stop.fullName
-                                )
-                            },
-                            onCall = { DriverActions.openPhoneDialer(context, stop.phone) },
-                            onMarkDelivered = {
-                                scope.launch {
-                                    val res = houseRepo.updateDeliveryStatus(stop.navId, "delivered")
-                                    res.onSuccess {
-                                        Toast.makeText(context, "บันทึก: ส่งสำเร็จแล้ว", Toast.LENGTH_SHORT).show()
-                                        loadStops()
-                                    }.onFailure {
-                                        Toast.makeText(context, "อัปเดตไม่สำเร็จ: ${it.message}", Toast.LENGTH_SHORT).show()
+                } else {
+                    LazyColumn(
+                        modifier = Modifier.fillMaxSize(),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        itemsIndexed(filteredStops, key = { _, item -> item.navId }) { index, stop ->
+                            DeliveryStopCard(
+                                stop = stop,
+                                stopIndex = index + 1,
+                                handMode = prefs.handMode,
+                                onNavigate = {
+                                    DriverActions.openMapNavigation(
+                                        context,
+                                        stop.lat,
+                                        stop.lng,
+                                        stop.address,
+                                        stop.fullName
+                                    )
+                                },
+                                onCall = { DriverActions.openPhoneDialer(context, stop.phone) },
+                                onMarkDelivered = {
+                                    scope.launch {
+                                        val res = houseRepo.updateDeliveryStatus(stop.navId, "delivered")
+                                        res.onSuccess {
+                                            Toast.makeText(context, "บันทึก: ส่งสำเร็จแล้ว", Toast.LENGTH_SHORT).show()
+                                            loadStops()
+                                        }.onFailure {
+                                            Toast.makeText(context, "อัปเดตไม่สำเร็จ: ${it.message}", Toast.LENGTH_SHORT).show()
+                                        }
                                     }
-                                }
-                            },
-                            onOpenReportDialog = { reportingStop = stop },
-                            onRevertStatus = {
-                                scope.launch {
-                                    val res = houseRepo.updateDeliveryStatus(stop.navId, "pending")
-                                    res.onSuccess {
-                                        Toast.makeText(context, "คืนสถานะเป็น: รอดำเนินการ", Toast.LENGTH_SHORT).show()
-                                        loadStops()
-                                    }.onFailure {
-                                        Toast.makeText(context, "อัปเดตไม่สำเร็จ: ${it.message}", Toast.LENGTH_SHORT).show()
+                                },
+                                onOpenReportDialog = { reportingStop = stop },
+                                onRevertStatus = {
+                                    scope.launch {
+                                        val res = houseRepo.updateDeliveryStatus(stop.navId, "pending")
+                                        res.onSuccess {
+                                            Toast.makeText(context, "คืนสถานะเป็น: รอดำเนินการ", Toast.LENGTH_SHORT).show()
+                                            loadStops()
+                                        }.onFailure {
+                                            Toast.makeText(context, "อัปเดตไม่สำเร็จ: ${it.message}", Toast.LENGTH_SHORT).show()
+                                        }
                                     }
-                                }
-                            },
-                            onEditNote = { editingNoteStop = stop },
-                            onDelete = { deletingStop = stop }
-                        )
+                                },
+                                onEditNote = { editingNoteStop = stop },
+                                onDelete = { deletingStop = stop }
+                            )
+                        }
                     }
                 }
             }
