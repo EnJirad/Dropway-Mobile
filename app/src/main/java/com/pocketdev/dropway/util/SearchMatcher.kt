@@ -8,11 +8,21 @@ object SearchMatcher {
     private val TITLE_REGEX = Regex("^(?:นางสาว|นาง|นาย|น\\.ส\\.|น\\.ส|นส\\.|คุณ|เด็กชาย|เด็กหญิง|ด\\.ช\\.|ด\\.ญ\\.|mr\\.?|mrs\\.?|miss|ms\\.?)\\s*", RegexOption.IGNORE_CASE)
     private val UUID_REGEX = Regex("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
     private val PHONE_REGEX = Regex("0[689]\\d{8}|0[2-7]\\d{7}")
+    private val SKELETON_NON_ALPHANUM_REGEX = Regex("[^\\p{L}\\p{N}]")
+    private val WHITESPACE_REGEX = Regex("\\s+")
+    private val MOO_SPLIT_REGEX = Regex("""ม\.|หมู่|moo|\bm\.""", RegexOption.IGNORE_CASE)
+    private val HOUSE_NO_REGEX = Regex("""\d{1,5}(?:/\d{1,4})?""")
+    private val MOO_CLEAN_REGEX = Regex("""(?:ม\.|หมู่(?:ที่)?|moo\.?)\s*\d+""", RegexOption.IGNORE_CASE)
+    private val TEXT_NUMBERS_REGEX = Regex("""(?:^|\D)(\d{1,5}(?:/\d{1,4})?)(?!\d)""")
+    private val DASH_WHITESPACE_REGEX = Regex("[\\s-]")
+    private val DISTRICT_REGEX = Regex("""(?:ต\.|ตำบล|อ\.|อำเภอ)\s*([^ \t\n]+)""")
+    private val PROVINCE_STRIP_REGEX = Regex("""(?:จ\.|จังหวัด).*$""")
+    private val HOUSE_NUMBER_EXACT_REGEX = Regex("""^\d+(?:/\d+)?$""")
 
     fun skeleton(value: String): String {
         return value.lowercase()
             .replace(UUID_REGEX, " ")
-            .replace(Regex("[^\\p{L}\\p{N}]"), "")
+            .replace(SKELETON_NON_ALPHANUM_REGEX, "")
     }
 
     private fun bigrams(value: String): List<String> {
@@ -33,7 +43,7 @@ object SearchMatcher {
         if (textSkel.contains(full)) return 1f
 
         var best = 0f
-        val tokens = name.split(Regex("\\s+"))
+        val tokens = name.split(WHITESPACE_REGEX)
             .map { skeleton(it) }
             .filter { it.length >= 3 }
         if (tokens.isNotEmpty()) {
@@ -59,17 +69,23 @@ object SearchMatcher {
 
     fun houseNumbers(address: String?): List<String> {
         if (address.isNullOrBlank()) return emptyList()
-        val head = address.split(Regex("""ม\.|หมู่|moo|\bm\.""", RegexOption.IGNORE_CASE)).firstOrNull() ?: address
-        return Regex("""\d{1,5}(?:/\d{1,4})?""").findAll(head)
+        val head = address.split(MOO_SPLIT_REGEX, 2).firstOrNull() ?: address
+        return HOUSE_NO_REGEX.findAll(head)
             .map { it.value }
             .filter { usableNumber(it) }
             .toList()
     }
 
+    fun extractHouseNo(address: String?): String? {
+        if (address.isNullOrBlank()) return null
+        val head = address.split(MOO_SPLIT_REGEX, 2).firstOrNull() ?: address
+        return HOUSE_NO_REGEX.find(head)?.value
+    }
+
     fun textNumbers(text: String): Set<String> {
-        val cleaned = text.replace(Regex("""(?:ม\.|หมู่(?:ที่)?|moo\.?)\s*\d+""", RegexOption.IGNORE_CASE), " ")
+        val cleaned = text.replace(MOO_CLEAN_REGEX, " ")
         val found = mutableSetOf<String>()
-        val matches = Regex("""(?:^|\D)(\d{1,5}(?:/\d{1,4})?)(?!\d)""").findAll(cleaned)
+        val matches = TEXT_NUMBERS_REGEX.findAll(cleaned)
         for (m in matches) {
             val num = m.groupValues[1]
             if (usableNumber(num)) found.add(num)
@@ -78,7 +94,7 @@ object SearchMatcher {
     }
 
     fun phonesInText(text: String): List<String> {
-        val compact = text.replace(Regex("[\\s-]"), "")
+        val compact = text.replace(DASH_WHITESPACE_REGEX, "")
         return PHONE_REGEX.findAll(compact).map { it.value }.toList()
     }
 
@@ -145,14 +161,14 @@ object SearchMatcher {
 
     fun extractDistrict(address: String?): String? {
         if (address.isNullOrBlank()) return null
-        val match = Regex("""(?:ต\.|ตำบล|อ\.|อำเภอ)\s*([^ \t\n]+)""").find(address) ?: return null
+        val match = DISTRICT_REGEX.find(address) ?: return null
         val raw = match.groupValues.getOrNull(1) ?: return null
-        val name = raw.replace(Regex("""(?:จ\.|จังหวัด).*$"""), "").trim()
+        val name = PROVINCE_STRIP_REGEX.replace(raw, "").trim()
         return if (name.isNotEmpty()) name else null
     }
 
     fun isHouseNumber(term: String): Boolean {
-        return Regex("""^\d+(?:/\d+)?$""").matches(term.trim())
+        return HOUSE_NUMBER_EXACT_REGEX.matches(term.trim())
     }
 
     fun rankHouseNumberMatch(address: String?, term: String): Int {
@@ -160,8 +176,8 @@ object SearchMatcher {
         val search = term.trim()
         if (!isHouseNumber(search)) return 0
 
-        val head = address.split(Regex("""ม\.|หมู่|moo|\bm\.""", RegexOption.IGNORE_CASE)).firstOrNull() ?: address
-        val houseNo = Regex("""\d+(?:/\d+)?""").find(head)?.value ?: return 0
+        val head = address.split(MOO_SPLIT_REGEX, 2).firstOrNull() ?: address
+        val houseNo = HOUSE_NO_REGEX.find(head)?.value ?: return 0
         val mainPart = houseNo.split("/")[0]
         val hasFraction = houseNo.contains("/")
 

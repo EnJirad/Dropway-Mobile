@@ -81,32 +81,44 @@ fun HousesScreen(
         loadHouses()
     }
 
-    // Districts list
-    val districts = remember(houses) {
-        val list = houses.mapNotNull { SearchMatcher.extractDistrict(it.address) }.distinct()
-        listOf("ทั้งหมด") + list
+    // Districts list (computed asynchronously in background for large datasets)
+    var districts by remember { mutableStateOf<List<String>>(listOf("ทั้งหมด")) }
+
+    LaunchedEffect(houses) {
+        if (houses.isEmpty()) {
+            districts = listOf("ทั้งหมด")
+            return@LaunchedEffect
+        }
+        withContext(Dispatchers.Default) {
+            val list = houses.mapNotNull { SearchMatcher.extractDistrict(it.address) }.distinct().sorted()
+            withContext(Dispatchers.Main) {
+                districts = listOf("ทั้งหมด") + list
+            }
+        }
     }
 
-    // Optimized background filtering and ranking (offloaded to Dispatchers.Default for 60fps performance)
+    // Optimized background filtering, debouncing, and ranking (offloaded to Dispatchers.Default for 60fps performance)
     LaunchedEffect(houses, searchQuery, selectedDistrict) {
         isFiltering = true
+        if (searchQuery.isNotBlank()) {
+            kotlinx.coroutines.delay(250) // Debounce rapid keystrokes
+        }
         withContext(Dispatchers.Default) {
             var list = houses
 
             // District filter
             if (selectedDistrict != "ทั้งหมด") {
                 list = list.filter {
-                    val d = SearchMatcher.extractDistrict(it.address)
-                    d == selectedDistrict
+                    SearchMatcher.extractDistrict(it.address) == selectedDistrict
                 }
             }
 
             // Search query with ranking
             val filtered = if (searchQuery.isNotBlank()) {
-                val scored = list.map { house ->
+                val scored = list.mapNotNull { house ->
                     val score = SearchMatcher.matchHouseWithSearch(house, searchQuery)
-                    house to score
-                }.filter { it.second > 0 }
+                    if (score > 0) house to score else null
+                }
                 scored.sortedByDescending { it.second }.map { it.first }
             } else {
                 list
@@ -292,7 +304,7 @@ fun HousesScreen(
                 // High-performance virtualized list: Only visible items are rendered
                 LazyColumn(
                     modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 6.dp, bottom = 80.dp),
+                    contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 6.dp, bottom = 16.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     items(
@@ -418,13 +430,8 @@ fun HouseCard(
     onEdit: () -> Unit,
     onDelete: () -> Unit
 ) {
-    val houseNo = remember(house.address) {
-        val head = (house.address ?: "").split(Regex("""ม\.|หมู่|moo|\bm\.""", RegexOption.IGNORE_CASE)).firstOrNull() ?: (house.address ?: "")
-        Regex("""\d{1,5}(?:/\d{1,4})?""").find(head)?.value
-    }
-    val district = remember(house.address) {
-        SearchMatcher.extractDistrict(house.address)
-    }
+    val houseNo = remember(house.address) { SearchMatcher.extractHouseNo(house.address) }
+    val district = remember(house.address) { SearchMatcher.extractDistrict(house.address) }
 
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -549,7 +556,12 @@ fun HouseCard(
                         modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
                         verticalAlignment = Alignment.Top
                     ) {
-                        Text("📝", fontSize = 12.sp)
+                        Icon(
+                            Icons.Default.Edit,
+                            contentDescription = null,
+                            tint = Color(0xFF78350F),
+                            modifier = Modifier.size(13.dp).padding(top = 1.dp)
+                        )
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
                             text = house.note,

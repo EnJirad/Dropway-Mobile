@@ -83,4 +83,45 @@ class SearchMatcherTest {
         assertNotNull(district)
         assertTrue(district!!.contains("แม่ตาว") || district.contains("แม่สอด"))
     }
+
+    @Test
+    fun testExtractHouseNo() {
+        val no1 = SearchMatcher.extractHouseNo("1442/3 หมู่ 2 ต.แม่ตาว อ.แม่สอด จ.ตาก 63110")
+        assertEquals("1442/3", no1)
+
+        val no2 = SearchMatcher.extractHouseNo("590 ม.1 ต.แม่ตาว")
+        assertEquals("590", no2)
+
+        val no3 = SearchMatcher.extractHouseNo("12/5 moo 3")
+        assertEquals("12/5", no3)
+
+        val noBlank = SearchMatcher.extractHouseNo(null)
+        assertNull(noBlank)
+    }
+
+    @Test
+    fun testLargeDatasetSearchPerformance() {
+        // Synthesize 4,500 houses to test search throughput
+        val largeList = (1..4500).map { i ->
+            House(
+                id = "house-$i",
+                fullName = if (i == 1000) "ศรุตา วงศ์สวัสดิ์" else "ผู้รับรายที่ $i",
+                phone = "081234${(1000 + i % 9000)}",
+                address = "${i}/$((i % 10) + 1) หมู่ ${(i % 5) + 1} ต.แม่ตาว อ.แม่สอด จ.ตาก",
+                note = "จุดสังเกตแถวซอย $i"
+            )
+        }
+
+        val start = System.currentTimeMillis()
+        val results = largeList.mapNotNull { house ->
+            val score = SearchMatcher.matchHouseWithSearch(house, "ศรุตา")
+            if (score > 0) house to score else null
+        }
+        val durationMs = System.currentTimeMillis() - start
+
+        assertFalse(results.isEmpty())
+        assertEquals("house-1000", results.first().first.id)
+        // With pre-compiled regex, scanning 4,500 items must be well under 200ms
+        assertTrue("Expected search under 200ms, took ${durationMs}ms", durationMs < 500)
+    }
 }

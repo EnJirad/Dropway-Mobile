@@ -56,6 +56,7 @@ fun MainApp(prefs: PreferencesManager, neonClient: NeonClient) {
     var isDbConfigured by remember { mutableStateOf(prefs.isConfigured()) }
 
     Scaffold(
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
         bottomBar = {
             NavigationBar(
                 containerColor = SurfaceCard,
@@ -120,40 +121,11 @@ fun MainApp(prefs: PreferencesManager, neonClient: NeonClient) {
             }
         }
     ) { innerPadding ->
-        Column(
+        Box(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(innerPadding)
+                .padding(bottom = innerPadding.calculateBottomPadding())
         ) {
-            // Not connected warning banner
-            if (!isDbConfigured && currentTab != ScreenTab.SETTINGS) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(StatusPendingBg)
-                        .clickable { currentTab = ScreenTab.SETTINGS }
-                        .padding(horizontal = 16.dp, vertical = 8.dp)
-                ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Default.Warning, contentDescription = null, tint = StatusPending, modifier = Modifier.size(18.dp))
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(
-                                "ยังไม่ได้เชื่อมต่อ Neon Database — แตะเพื่อตั้งค่า",
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = StatusPending
-                            )
-                        }
-                        Icon(Icons.Default.ArrowForward, contentDescription = null, tint = StatusPending, modifier = Modifier.size(16.dp))
-                    }
-                }
-            }
-
             // Tab Content
             when (currentTab) {
                 ScreenTab.HOUSES -> {
