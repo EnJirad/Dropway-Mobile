@@ -34,6 +34,10 @@ class PreferencesManager(context: Context) {
         get() = prefs.getString(KEY_LAST_STATUS, "") ?: ""
         set(value) = prefs.edit().putString(KEY_LAST_STATUS, value).apply()
 
+    var sharingSubscriptionExpiryMs: Long
+        get() = prefs.getLong("sharing_subscription_expiry_ms", 0L)
+        set(value) = prefs.edit().putLong("sharing_subscription_expiry_ms", value).apply()
+
     fun isConfigured(): Boolean {
         val url = databaseUrl
         return url.isNotBlank() && (url.startsWith("postgres://") || url.startsWith("postgresql://"))

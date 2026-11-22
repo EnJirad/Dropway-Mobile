@@ -5,6 +5,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Place
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -12,6 +14,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.pocketdev.dropway.data.model.House
+import com.pocketdev.dropway.ui.theme.TealPrimary
+import com.pocketdev.dropway.util.CoordinateHelper
 
 @Composable
 fun AddEditHouseDialog(
@@ -22,10 +26,10 @@ fun AddEditHouseDialog(
     var fullName by remember { mutableStateOf(initialHouse?.fullName ?: "") }
     var phone by remember { mutableStateOf(initialHouse?.phone ?: "") }
     var address by remember { mutableStateOf(initialHouse?.address ?: "") }
-    var latText by remember { mutableStateOf(initialHouse?.lat?.toString() ?: "") }
-    var lngText by remember { mutableStateOf(initialHouse?.lng?.toString() ?: "") }
+    var coordText by remember { mutableStateOf(CoordinateHelper.format(initialHouse?.lat, initialHouse?.lng)) }
+    var isCoordError by remember { mutableStateOf(false) }
     var note by remember { mutableStateOf(initialHouse?.note ?: "") }
-    var quantityText by remember { mutableStateOf(initialHouse?.quantity?.toString() ?: "1") }
+    var showMapPicker by remember { mutableStateOf(false) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -59,22 +63,33 @@ fun AddEditHouseDialog(
                     maxLines = 3,
                     singleLine = false
                 )
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedTextField(
-                        value = latText,
-                        onValueChange = { latText = it },
-                        label = { Text("ละติจูด (Lat)") },
-                        modifier = Modifier.weight(1f),
-                        singleLine = true
-                    )
-                    OutlinedTextField(
-                        value = lngText,
-                        onValueChange = { lngText = it },
-                        label = { Text("ลองจิจูด (Lng)") },
-                        modifier = Modifier.weight(1f),
-                        singleLine = true
-                    )
-                }
+                // Single Coordinate input field with Map Pin button
+                OutlinedTextField(
+                    value = coordText,
+                    onValueChange = {
+                        coordText = it
+                        isCoordError = it.isNotBlank() && !CoordinateHelper.isValid(it)
+                    },
+                    label = { Text("พิกัดแผนที่ (ละติจูด,ลองจิจูด)") },
+                    placeholder = { Text("เช่น 16.66474,98.57846") },
+                    modifier = Modifier.fillMaxWidth(),
+                    isError = isCoordError,
+                    supportingText = if (isCoordError) {
+                        { Text("รูปแบบพิกัดไม่ถูกต้อง (ตัวอย่าง: 16.66474,98.57846)") }
+                    } else {
+                        { Text("กรอกพิกัดเอง หรือแตะไอคอนหมุดเพื่อเปิดแผนที่") }
+                    },
+                    trailingIcon = {
+                        IconButton(onClick = { showMapPicker = true }) {
+                            Icon(
+                                Icons.Default.Place,
+                                contentDescription = "เปิดแผนที่เลือกพิกัด",
+                                tint = TealPrimary
+                            )
+                        }
+                    },
+                    singleLine = true
+                )
                 OutlinedTextField(
                     value = note,
                     onValueChange = { note = it },
@@ -83,27 +98,25 @@ fun AddEditHouseDialog(
                     maxLines = 3,
                     singleLine = false
                 )
-                OutlinedTextField(
-                    value = quantityText,
-                    onValueChange = { quantityText = it },
-                    label = { Text("จำนวนพัสดุปกติ") },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true
-                )
             }
         },
         confirmButton = {
             Button(
                 onClick = {
+                    val parsedCoord = CoordinateHelper.parse(coordText)
+                    if (coordText.isNotBlank() && parsedCoord == null) {
+                        isCoordError = true
+                        return@Button
+                    }
                     val house = House(
                         id = initialHouse?.id ?: java.util.UUID.randomUUID().toString(),
                         fullName = fullName.trim().ifEmpty { null },
                         phone = phone.trim().ifEmpty { null },
                         address = address.trim().ifEmpty { null },
-                        lat = latText.toDoubleOrNull(),
-                        lng = lngText.toDoubleOrNull(),
+                        lat = parsedCoord?.lat,
+                        lng = parsedCoord?.lng,
                         note = note.trim().ifEmpty { null },
-                        quantity = quantityText.toIntOrNull() ?: 1
+                        quantity = initialHouse?.quantity ?: 1
                     )
                     onSave(house)
                 }
@@ -117,6 +130,20 @@ fun AddEditHouseDialog(
             }
         }
     )
+
+    if (showMapPicker) {
+        val parsed = CoordinateHelper.parse(coordText)
+        MapPickerDialog(
+            initialLat = parsed?.lat ?: initialHouse?.lat,
+            initialLng = parsed?.lng ?: initialHouse?.lng,
+            onDismiss = { showMapPicker = false },
+            onConfirm = { lat, lng ->
+                showMapPicker = false
+                coordText = CoordinateHelper.format(lat, lng)
+                isCoordError = false
+            }
+        )
+    }
 }
 
 @Composable

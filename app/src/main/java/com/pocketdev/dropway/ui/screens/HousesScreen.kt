@@ -24,6 +24,8 @@ import androidx.compose.ui.unit.sp
 import com.pocketdev.dropway.data.local.PreferencesManager
 import com.pocketdev.dropway.data.model.House
 import com.pocketdev.dropway.data.remote.NeonClient
+import com.pocketdev.dropway.data.repository.LocalHouseRepository
+import com.pocketdev.dropway.data.sharing.SharingManager
 import com.pocketdev.dropway.ui.components.AddEditHouseDialog
 import com.pocketdev.dropway.ui.components.AddToQueueDialog
 import com.pocketdev.dropway.ui.components.ConfirmActionDialog
@@ -37,6 +39,8 @@ import kotlinx.coroutines.withContext
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HousesScreen(
+    houseRepo: LocalHouseRepository,
+    sharingManager: SharingManager,
     neonClient: NeonClient,
     prefs: PreferencesManager,
     onNavigateToSettings: () -> Unit,
@@ -60,19 +64,18 @@ fun HousesScreen(
     var addingToQueueHouse by remember { mutableStateOf<House?>(null) }
 
     fun loadHouses() {
-        if (!prefs.isConfigured()) {
-            errorMessage = "กรุณาตั้งค่า Neon Database URL ในหน้าตั้งค่าก่อนใช้งาน"
-            return
-        }
         isLoading = true
         errorMessage = null
         scope.launch {
-            val res = neonClient.getHouses(null)
-            isLoading = false
-            res.onSuccess {
-                houses = it
-            }.onFailure {
-                errorMessage = "ดึงข้อมูลคลังบ้านไม่สำเร็จ: ${it.message}"
+            try {
+                // Initialize local database & seed from bundled assets if first launch
+                houseRepo.initialize()
+                val list = houseRepo.getHouses()
+                houses = list
+            } catch (e: Exception) {
+                errorMessage = "ไม่สามารถอ่านคลังบ้านจากฐานข้อมูลในเครื่อง: ${e.message}"
+            } finally {
+                isLoading = false
             }
         }
     }
@@ -161,20 +164,51 @@ fun HousesScreen(
                     }
                 },
                 actions = {
+                    // Backup / Export
+                    IconButton(
+                        onClick = {
+                            scope.launch {
+                                val res = houseRepo.exportBackupFile()
+                                res.onSuccess { file ->
+                                    try {
+                                        val uri = androidx.core.content.FileProvider.getUriForFile(
+                                            context,
+                                            "${context.packageName}.fileprovider",
+                                            file
+                                        )
+                                        val intent = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+                                            type = "application/json"
+                                            putExtra(android.content.Intent.EXTRA_STREAM, uri)
+                                            addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                        }
+                                        context.startActivity(android.content.Intent.createChooser(intent, "สำรองข้อมูลคลังบ้าน"))
+                                    } catch (_: Exception) {
+                                        Toast.makeText(context, "สร้างไฟล์สำรองสำเร็จที่: ${file.name}", Toast.LENGTH_LONG).show()
+                                    }
+                                }.onFailure {
+                                    Toast.makeText(context, "สำรองข้อมูลไม่สำเร็จ: ${it.message}", Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                        }
+                    ) {
+                        Icon(Icons.Default.Share, contentDescription = "สำรองข้อมูลคลังบ้าน", tint = TextSecondary)
+                    }
                     IconButton(onClick = { loadHouses() }) {
-                        Icon(Icons.Default.Refresh, contentDescription = "รีเฟรช")
+                        Icon(Icons.Default.Refresh, contentDescription = "รีเฟรช", tint = TextSecondary)
+                    }
+                    Button(
+                        onClick = { isAddingHouse = true },
+                        colors = ButtonDefaults.buttonColors(containerColor = TealPrimary),
+                        shape = RoundedCornerShape(8.dp),
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                        modifier = Modifier.padding(end = 8.dp)
+                    ) {
+                        Icon(Icons.Default.Add, contentDescription = null, tint = Color.White, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("เพิ่มบ้าน", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = Color.White)
                     }
                 }
             )
-        },
-        floatingActionButton = {
-            FloatingActionButton(
-                onClick = { isAddingHouse = true },
-                containerColor = TealPrimary,
-                contentColor = Color.White
-            ) {
-                Icon(Icons.Default.Add, contentDescription = "เพิ่มบ้านใหม่")
-            }
         }
     ) { padding ->
         Column(
@@ -342,7 +376,7 @@ fun HousesScreen(
             onSave = { newHouse ->
                 isAddingHouse = false
                 scope.launch {
-                    val res = neonClient.createHouse(newHouse)
+                    val res = houseRepo.saveHouse(newHouse)
                     res.onSuccess {
                         Toast.makeText(context, "เพิ่มบ้านสำเร็จแล้ว", Toast.LENGTH_SHORT).show()
                         loadHouses()
@@ -362,7 +396,7 @@ fun HousesScreen(
             onSave = { updatedHouse ->
                 editingHouse = null
                 scope.launch {
-                    val res = neonClient.updateHouse(updatedHouse)
+                    val res = houseRepo.saveHouse(updatedHouse)
                     res.onSuccess {
                         Toast.makeText(context, "อัปเดตข้อมูลบ้านสำเร็จ", Toast.LENGTH_SHORT).show()
                         loadHouses()
@@ -374,20 +408,24 @@ fun HousesScreen(
         )
     }
 
-    // Delete House Dialog
+    // Delete House Dialog (guarded by confirmation dialog)
     deletingHouse?.let { house ->
+        val houseDisplayName = house.fullName?.takeIf { it.isNotBlank() }
+            ?: house.address?.takeIf { it.isNotBlank() }
+            ?: "หลังที่เลือก"
         ConfirmActionDialog(
-            title = "ลบข้อมูลบ้าน",
-            message = "ต้องการลบบ้าน '${house.fullName ?: house.address ?: "หลังนี้"}' ออกจากคลังบ้านอย่างถาวรหรือไม่?",
-            confirmText = "ลบบ้าน",
+            title = "ยืนยันการลบบ้าน",
+            message = "คุณต้องการลบข้อมูลบ้าน '$houseDisplayName' ออกจากคลังบ้านอย่างถาวรหรือไม่?\nการดำเนินการนี้ไม่สามารถยกเลิกได้",
+            confirmText = "ยืนยันลบบ้าน",
             isDestructive = true,
             onDismiss = { deletingHouse = null },
             onConfirm = {
+                val targetId = house.id
                 deletingHouse = null
                 scope.launch {
-                    val res = neonClient.deleteHouse(house.id)
+                    val res = houseRepo.deleteHouse(targetId)
                     res.onSuccess {
-                        Toast.makeText(context, "ลบบ้านสำเร็จแล้ว", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(context, "ลบข้อมูลบ้านสำเร็จแล้ว", Toast.LENGTH_SHORT).show()
                         loadHouses()
                     }.onFailure {
                         Toast.makeText(context, "ลบไม่สำเร็จ: ${it.message}", Toast.LENGTH_SHORT).show()
@@ -447,6 +485,23 @@ fun HouseCard(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                    // Shared badge
+                    if (house.sourceType == "shared" || house.isShared) {
+                        Surface(
+                            color = Color(0xFFEFF6FF),
+                            shape = RoundedCornerShape(6.dp)
+                        ) {
+                            Text(
+                                text = "แชร์จาก ${house.creatorName ?: "คนขับท่านอื่น"}",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = Color(0xFF1D4ED8),
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp)
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(6.dp))
+                    }
+
                     // House No Badge
                     if (!houseNo.isNullOrBlank()) {
                         Surface(
@@ -481,11 +536,30 @@ fun HouseCard(
                 }
 
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    IconButton(onClick = onEdit, modifier = Modifier.size(32.dp)) {
-                        Icon(Icons.Default.Edit, contentDescription = "แก้ไข", tint = TextSecondary, modifier = Modifier.size(16.dp))
+                    // Edit button (positioned immediately to the left of Delete button)
+                    IconButton(
+                        onClick = onEdit,
+                        modifier = Modifier.size(36.dp)
+                    ) {
+                        Icon(
+                            Icons.Default.Edit,
+                            contentDescription = "แก้ไขข้อมูลบ้าน",
+                            tint = TextSecondary,
+                            modifier = Modifier.size(18.dp)
+                        )
                     }
-                    IconButton(onClick = onDelete, modifier = Modifier.size(32.dp)) {
-                        Icon(Icons.Default.Delete, contentDescription = "ลบ", tint = TextMuted, modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(2.dp))
+                    // Delete button
+                    IconButton(
+                        onClick = onDelete,
+                        modifier = Modifier.size(36.dp)
+                    ) {
+                        Icon(
+                            Icons.Default.Delete,
+                            contentDescription = "ลบบ้านออกจากคลัง",
+                            tint = TextMuted,
+                            modifier = Modifier.size(18.dp)
+                        )
                     }
                 }
             }

@@ -15,8 +15,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.pocketdev.dropway.data.local.LocalHouseDatabase
 import com.pocketdev.dropway.data.local.PreferencesManager
 import com.pocketdev.dropway.data.remote.NeonClient
+import com.pocketdev.dropway.data.repository.LocalHouseRepository
+import com.pocketdev.dropway.data.sharing.SharingManager
 import com.pocketdev.dropway.ui.screens.HousesScreen
 import com.pocketdev.dropway.ui.screens.NavigationScreen
 import com.pocketdev.dropway.ui.screens.ScanScreen
@@ -27,16 +30,27 @@ class MainActivity : ComponentActivity() {
 
     private lateinit var prefs: PreferencesManager
     private lateinit var neonClient: NeonClient
+    private lateinit var localDb: LocalHouseDatabase
+    private lateinit var houseRepo: LocalHouseRepository
+    private lateinit var sharingManager: SharingManager
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
         prefs = PreferencesManager(applicationContext)
         neonClient = NeonClient { prefs.databaseUrl }
+        localDb = LocalHouseDatabase.getInstance(applicationContext)
+        houseRepo = LocalHouseRepository(applicationContext, localDb, neonClient, prefs)
+        sharingManager = SharingManager(applicationContext, prefs, localDb)
 
         setContent {
             DropwayTheme {
-                MainApp(prefs = prefs, neonClient = neonClient)
+                MainApp(
+                    prefs = prefs,
+                    neonClient = neonClient,
+                    houseRepo = houseRepo,
+                    sharingManager = sharingManager
+                )
             }
         }
     }
@@ -51,7 +65,12 @@ enum class ScreenTab(val title: String) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun MainApp(prefs: PreferencesManager, neonClient: NeonClient) {
+fun MainApp(
+    prefs: PreferencesManager,
+    neonClient: NeonClient,
+    houseRepo: LocalHouseRepository,
+    sharingManager: SharingManager
+) {
     var currentTab by remember { mutableStateOf(ScreenTab.HOUSES) }
     var isDbConfigured by remember { mutableStateOf(prefs.isConfigured()) }
 
@@ -130,6 +149,8 @@ fun MainApp(prefs: PreferencesManager, neonClient: NeonClient) {
             when (currentTab) {
                 ScreenTab.HOUSES -> {
                     HousesScreen(
+                        houseRepo = houseRepo,
+                        sharingManager = sharingManager,
                         neonClient = neonClient,
                         prefs = prefs,
                         onNavigateToSettings = { currentTab = ScreenTab.SETTINGS },
