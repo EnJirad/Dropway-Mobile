@@ -17,15 +17,18 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.pocketdev.dropway.data.local.PreferencesManager
 import com.pocketdev.dropway.data.model.House
-import com.pocketdev.dropway.data.remote.NeonClient
 import com.pocketdev.dropway.data.repository.LocalHouseRepository
 import com.pocketdev.dropway.data.sharing.SharingManager
+import com.pocketdev.dropway.data.sharing.VaultMetadata
 import com.pocketdev.dropway.ui.components.AddEditHouseDialog
 import com.pocketdev.dropway.ui.components.AddToQueueDialog
 import com.pocketdev.dropway.ui.components.ConfirmActionDialog
@@ -41,7 +44,6 @@ import kotlinx.coroutines.withContext
 fun HousesScreen(
     houseRepo: LocalHouseRepository,
     sharingManager: SharingManager,
-    neonClient: NeonClient,
     prefs: PreferencesManager,
     onNavigateToSettings: () -> Unit,
     onNavigateToNavigation: () -> Unit = {}
@@ -62,6 +64,8 @@ fun HousesScreen(
     var editingHouse by remember { mutableStateOf<House?>(null) }
     var deletingHouse by remember { mutableStateOf<House?>(null) }
     var addingToQueueHouse by remember { mutableStateOf<House?>(null) }
+    var pendingPaywallMeta by remember { mutableStateOf<VaultMetadata?>(null) }
+    var pendingImportBytes by remember { mutableStateOf<ByteArray?>(null) }
 
     fun loadHouses() {
         isLoading = true
@@ -82,6 +86,37 @@ fun HousesScreen(
 
     LaunchedEffect(Unit) {
         loadHouses()
+    }
+
+    val dwvPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            scope.launch {
+                try {
+                    val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                    if (bytes != null) {
+                        val meta = houseRepo.inspectDwv(bytes)
+                        if (meta == null) {
+                            Toast.makeText(context, "ไฟล์ไม่ใช่รูปแบบ Dropway Vault (.dwv) ที่ถูกต้อง", Toast.LENGTH_LONG).show()
+                        } else if (!prefs.isSubscribed) {
+                            pendingPaywallMeta = meta
+                            pendingImportBytes = bytes
+                        } else {
+                            val imp = houseRepo.importDwvVault(bytes)
+                            imp.onSuccess {
+                                Toast.makeText(context, it.message, Toast.LENGTH_LONG).show()
+                                loadHouses()
+                            }.onFailure {
+                                Toast.makeText(context, "นำเข้าไม่สำเร็จ: ${it.message}", Toast.LENGTH_LONG).show()
+                            }
+                        }
+                    }
+                } catch (e: Exception) {
+                    Toast.makeText(context, "เกิดข้อผิดพลาด: ${e.message}", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
     }
 
     // Districts list (computed asynchronously in background for large datasets)
@@ -164,11 +199,11 @@ fun HousesScreen(
                     }
                 },
                 actions = {
-                    // Backup / Export
+                    // Export .dwv (Encrypted Vault)
                     IconButton(
                         onClick = {
                             scope.launch {
-                                val res = houseRepo.exportBackupFile()
+                                val res = houseRepo.exportDwvVault("คลังบ้าน ${prefs.driverName}")
                                 res.onSuccess { file ->
                                     try {
                                         val uri = androidx.core.content.FileProvider.getUriForFile(
@@ -177,21 +212,25 @@ fun HousesScreen(
                                             file
                                         )
                                         val intent = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
-                                            type = "application/json"
+                                            type = "application/octet-stream"
                                             putExtra(android.content.Intent.EXTRA_STREAM, uri)
                                             addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
                                         }
-                                        context.startActivity(android.content.Intent.createChooser(intent, "สำรองข้อมูลคลังบ้าน"))
+                                        context.startActivity(android.content.Intent.createChooser(intent, "แชร์คลังบ้านแบบเข้ารหัส (.dwv)"))
                                     } catch (_: Exception) {
-                                        Toast.makeText(context, "สร้างไฟล์สำรองสำเร็จที่: ${file.name}", Toast.LENGTH_LONG).show()
+                                        Toast.makeText(context, "สร้างไฟล์ .dwv สำเร็จ: ${file.name}", Toast.LENGTH_LONG).show()
                                     }
                                 }.onFailure {
-                                    Toast.makeText(context, "สำรองข้อมูลไม่สำเร็จ: ${it.message}", Toast.LENGTH_SHORT).show()
+                                    Toast.makeText(context, "ส่งออกไม่สำเร็จ: ${it.message}", Toast.LENGTH_SHORT).show()
                                 }
                             }
                         }
                     ) {
-                        Icon(Icons.Default.Share, contentDescription = "สำรองข้อมูลคลังบ้าน", tint = TextSecondary)
+                        Icon(Icons.Default.Share, contentDescription = "แชร์คลังบ้าน (.dwv)", tint = TextSecondary)
+                    }
+                    // Import .dwv (Encrypted Vault)
+                    IconButton(onClick = { dwvPickerLauncher.launch("*/*") }) {
+                        Icon(Icons.Default.ArrowForward, contentDescription = "นำเข้าคลังบ้าน (.dwv)", tint = TextSecondary)
                     }
                     IconButton(onClick = { loadHouses() }) {
                         Icon(Icons.Default.Refresh, contentDescription = "รีเฟรช", tint = TextSecondary)
@@ -273,7 +312,7 @@ fun HousesScreen(
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         CircularProgressIndicator(color = TealPrimary)
                         Spacer(modifier = Modifier.height(8.dp))
-                        Text("กำลังโหลดข้อมูลบ้านจาก Neon...", fontSize = 12.sp, color = TextMuted)
+                        Text("กำลังโหลดคลังบ้านในเครื่อง...", fontSize = 12.sp, color = TextMuted)
                     }
                 }
             } else if (errorMessage != null) {
@@ -289,7 +328,7 @@ fun HousesScreen(
                         Text(errorMessage ?: "", color = TextSecondary, fontSize = 14.sp)
                         Spacer(modifier = Modifier.height(16.dp))
                         Button(onClick = onNavigateToSettings) {
-                            Text("ไปหน้าตั้งค่า Neon")
+                            Text("ไปหน้าตั้งค่า")
                         }
                     }
                 }
@@ -318,14 +357,10 @@ fun HousesScreen(
                                 onClick = {
                                     scope.launch {
                                         isLoading = true
-                                        val res = neonClient.seedMaeSotData()
+                                        val count = houseRepo.initialize()
                                         isLoading = false
-                                        res.onSuccess {
-                                            Toast.makeText(context, "ใส่ข้อมูลตัวอย่างแม่สอด $it จุดแล้ว", Toast.LENGTH_SHORT).show()
-                                            loadHouses()
-                                        }.onFailure {
-                                            Toast.makeText(context, "ผิดพลาด: ${it.message}", Toast.LENGTH_SHORT).show()
-                                        }
+                                        Toast.makeText(context, "โหลดข้อมูลแม่สอด $count จุดแล้ว", Toast.LENGTH_SHORT).show()
+                                        loadHouses()
                                     }
                                 }
                             ) {
@@ -348,15 +383,20 @@ fun HousesScreen(
                     ) { house ->
                         HouseCard(
                             house = house,
+                            isSubscribed = prefs.isSubscribed,
                             onAddToQueue = { addingToQueueHouse = house },
                             onNavigate = {
-                                DriverActions.openMapNavigation(
-                                    context,
-                                    house.lat,
-                                    house.lng,
-                                    house.address,
-                                    house.fullName
-                                )
+                                if ((house.sourceType == "shared" || house.isShared) && !prefs.isSubscribed) {
+                                    Toast.makeText(context, "พิกัดนี้ถูกล็อกโดยระบบ Subscription กรุณาสมัครเพื่อดูพิกัด", Toast.LENGTH_LONG).show()
+                                } else {
+                                    DriverActions.openMapNavigation(
+                                        context,
+                                        house.lat,
+                                        house.lng,
+                                        house.address,
+                                        house.fullName
+                                    )
+                                }
                             },
                             onCall = { DriverActions.openPhoneDialer(context, house.phone) },
                             onEdit = { editingHouse = house },
@@ -443,10 +483,10 @@ fun HousesScreen(
             onConfirm = { trackingNumber ->
                 addingToQueueHouse = null
                 scope.launch {
-                    val res = neonClient.addToNavigation(
-                        houseId = house.id,
+                    val res = houseRepo.addToNavigation(
+                        house = house,
                         trackingNumber = trackingNumber,
-                        userId = prefs.userId
+                        navNote = null
                     )
                     res.onSuccess {
                         Toast.makeText(context, "เพิ่มเข้าคิวจัดส่งเรียบร้อยแล้ว!", Toast.LENGTH_SHORT).show()
@@ -457,11 +497,71 @@ fun HousesScreen(
             }
         )
     }
+
+    // Paywall Dialog for Shared Vault Import
+    pendingPaywallMeta?.let { meta ->
+        AlertDialog(
+            onDismissRequest = {
+                pendingPaywallMeta = null
+                pendingImportBytes = null
+            },
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.Lock, contentDescription = null, tint = StatusReported)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("ปลดล็อกคลังบ้าน (.dwv)", fontWeight = FontWeight.Bold)
+                }
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        "คลังบ้าน: ${meta.vaultTitle} (${meta.recordCount} หลัง)",
+                        fontWeight = FontWeight.Bold,
+                        color = TextPrimary
+                    )
+                    Text(
+                        "ผู้สร้างและแชร์: ${meta.creatorName}",
+                        fontSize = 13.sp,
+                        color = TealDark
+                    )
+                    Divider(color = BorderOutline)
+                    Text(
+                        "ไฟล์นี้ถูกเข้ารหัสความปลอดภัยระดับชิป เพื่อคุ้มครองข้อมูลของพนักงานส่งของ จำเป็นต้องมีแพ็กเกจ Dropway Active Subscription เพื่อปลดล็อกและนำเข้าพิกัด",
+                        fontSize = 12.sp,
+                        color = TextSecondary
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        pendingPaywallMeta = null
+                        pendingImportBytes = null
+                        onNavigateToSettings()
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = TealPrimary)
+                ) {
+                    Text("สมัครสมาชิก / ใส่รหัส License")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = {
+                        pendingPaywallMeta = null
+                        pendingImportBytes = null
+                    }
+                ) {
+                    Text("ยกเลิก")
+                }
+            }
+        )
+    }
 }
 
 @Composable
 fun HouseCard(
     house: House,
+    isSubscribed: Boolean = true,
     onAddToQueue: () -> Unit,
     onNavigate: () -> Unit,
     onCall: () -> Unit,
@@ -485,19 +585,32 @@ fun HouseCard(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
-                    // Shared badge
+                    // Shared badge with Subscription Lock indication
                     if (house.sourceType == "shared" || house.isShared) {
                         Surface(
-                            color = Color(0xFFEFF6FF),
+                            color = if (isSubscribed) Color(0xFFEFF6FF) else Color(0xFFFEF2F2),
                             shape = RoundedCornerShape(6.dp)
                         ) {
-                            Text(
-                                text = "แชร์จาก ${house.creatorName ?: "คนขับท่านอื่น"}",
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = Color(0xFF1D4ED8),
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
                                 modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp)
-                            )
+                            ) {
+                                if (!isSubscribed) {
+                                    Icon(
+                                        Icons.Default.Lock,
+                                        contentDescription = "ล็อกพิกัด",
+                                        tint = Color(0xFFDC2626),
+                                        modifier = Modifier.size(11.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(3.dp))
+                                }
+                                Text(
+                                    text = if (isSubscribed) "แชร์จาก ${house.creatorName ?: "คนขับท่านอื่น"}" else "ล็อกพิกัด (แชร์โดย ${house.creatorName ?: "เพื่อนร่วมงาน"})",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = if (isSubscribed) Color(0xFF1D4ED8) else Color(0xFFDC2626)
+                                )
+                            }
                         }
                         Spacer(modifier = Modifier.width(6.dp))
                     }

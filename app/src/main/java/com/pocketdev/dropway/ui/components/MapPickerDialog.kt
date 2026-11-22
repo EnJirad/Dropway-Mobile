@@ -16,6 +16,8 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -24,7 +26,6 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
@@ -35,8 +36,10 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
+import com.pocketdev.dropway.data.local.PreferencesManager
 import com.pocketdev.dropway.ui.theme.*
-import com.pocketdev.dropway.util.CoordinateHelper
+import com.pocketdev.dropway.util.MapProvider
+import com.pocketdev.dropway.util.MapProviderRegistry
 import java.util.Locale
 
 @SuppressLint("SetJavaScriptEnabled")
@@ -48,6 +51,7 @@ fun MapPickerDialog(
     onConfirm: (lat: Double, lng: Double) -> Unit
 ) {
     val context = LocalContext.current
+    val prefs = remember { PreferencesManager(context) }
 
     // Default to Mae Sot center if null
     val startLat = initialLat ?: 16.71667
@@ -56,9 +60,14 @@ fun MapPickerDialog(
 
     var currentLat by remember { mutableStateOf(startLat) }
     var currentLng by remember { mutableStateOf(startLng) }
-    var isSatellite by remember { mutableStateOf(false) }
     var isLocating by remember { mutableStateOf(false) }
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
+
+    // Active Map Provider (Default to user's saved preference or Google Satellite)
+    var selectedProvider by remember {
+        mutableStateOf(MapProviderRegistry.getById(prefs.defaultMapLayer))
+    }
+    var showLayerPickerSheet by remember { mutableStateOf(false) }
 
     fun moveToGpsLocation() {
         val locationManager = context.getSystemService(Context.LOCATION_SERVICE) as? LocationManager
@@ -122,6 +131,16 @@ fun MapPickerDialog(
         }
     }
 
+    fun applyMapProvider(provider: MapProvider, saveAsDefault: Boolean = false) {
+        selectedProvider = provider
+        if (saveAsDefault) {
+            prefs.defaultMapLayer = provider.id
+        }
+        val js = "if (window.switchMapLayer) { window.switchMapLayer('${provider.tileUrl}', '${provider.subdomains}', ${provider.maxZoom}); }"
+        webViewRef?.evaluateJavascript(js, null)
+        Toast.makeText(context, "เปลี่ยนเป็น: ${provider.name}", Toast.LENGTH_SHORT).show()
+    }
+
     Dialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false)
@@ -158,15 +177,10 @@ fun MapPickerDialog(
                             Text(
                                 "เลื่อนแผนที่ให้หมุดตรงกับหลังคาบ้านที่ต้องการ",
                                 fontSize = 12.sp,
-                                color = TextMuted
+                                color = TextSecondary
                             )
                         }
-                        IconButton(
-                            onClick = onDismiss,
-                            modifier = Modifier
-                                .size(32.dp)
-                                .background(NeutralBackground, CircleShape)
-                        ) {
+                        IconButton(onClick = onDismiss) {
                             Icon(Icons.Default.Close, contentDescription = "ปิด", tint = TextSecondary, modifier = Modifier.size(18.dp))
                         }
                     }
@@ -198,6 +212,10 @@ fun MapPickerDialog(
 
                                     webViewClient = object : WebViewClient() {}
 
+                                    val initUrl = selectedProvider.tileUrl
+                                    val initSubs = selectedProvider.subdomains
+                                    val initZoomMax = selectedProvider.maxZoom
+
                                     val htmlContent = """
                                         <!DOCTYPE html>
                                         <html>
@@ -207,21 +225,23 @@ fun MapPickerDialog(
                                             <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
                                             <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
                                             <style>
-                                                html, body, #map { height: 100%; width: 100%; margin: 0; padding: 0; }
+                                                html, body, #map { height: 100%; width: 100%; margin: 0; padding: 0; background: #1a1a1a; }
                                                 .leaflet-control-attribution { display: none !important; }
                                             </style>
                                         </head>
                                         <body>
                                             <div id="map"></div>
                                             <script>
-                                                var osmLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 });
-                                                var satLayer = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', { maxZoom: 19 });
+                                                var currentTileLayer = L.tileLayer('$initUrl', {
+                                                    maxZoom: $initZoomMax,
+                                                    subdomains: '$initSubs'
+                                                });
 
                                                 var map = L.map('map', {
                                                     center: [$startLat, $startLng],
                                                     zoom: $initialZoom,
                                                     zoomControl: false,
-                                                    layers: [osmLayer]
+                                                    layers: [currentTileLayer]
                                                 });
 
                                                 map.on('move', function() {
@@ -231,14 +251,15 @@ fun MapPickerDialog(
                                                     }
                                                 });
 
-                                                window.setMapType = function(isSatellite) {
-                                                    if (isSatellite) {
-                                                        map.removeLayer(osmLayer);
-                                                        map.addLayer(satLayer);
-                                                    } else {
-                                                        map.removeLayer(satLayer);
-                                                        map.addLayer(osmLayer);
+                                                window.switchMapLayer = function(tileUrl, subdomains, maxZoom) {
+                                                    if (currentTileLayer) {
+                                                        map.removeLayer(currentTileLayer);
                                                     }
+                                                    currentTileLayer = L.tileLayer(tileUrl, {
+                                                        maxZoom: maxZoom || 19,
+                                                        subdomains: subdomains || '0123'
+                                                    });
+                                                    map.addLayer(currentTileLayer);
                                                 };
 
                                                 window.moveToLocation = function(lat, lng, zoom) {
@@ -258,13 +279,12 @@ fun MapPickerDialog(
 
                         // Center Pin Overlay (stays precisely fixed at center of map)
                         Box(
-                            modifier = Modifier
-                                .fillMaxSize(),
+                            modifier = Modifier.fillMaxSize(),
                             contentAlignment = Alignment.Center
                         ) {
                             Column(
                                 horizontalAlignment = Alignment.CenterHorizontally,
-                                modifier = Modifier.offset(y = (-20).dp)
+                                modifier = Modifier.offset(y = (-18).dp)
                             ) {
                                 Box(
                                     modifier = Modifier
@@ -288,14 +308,13 @@ fun MapPickerDialog(
                             }
                         }
 
-                        // Top Controls: Floating Layer Toggle & Coordinate HUD
+                        // Top Controls: Layer Indicator & Coordinate HUD
                         Column(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .padding(12.dp),
                             verticalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            // Coordinate Badge
                             Surface(
                                 color = SurfaceCard.copy(alpha = 0.95f),
                                 shape = RoundedCornerShape(8.dp),
@@ -318,7 +337,7 @@ fun MapPickerDialog(
                             }
                         }
 
-                        // Floating Right Controls: Map Layer Toggle & Current Location Button
+                        // Floating Right Controls: Map Layer Switcher & Current Location Button
                         Column(
                             modifier = Modifier
                                 .align(Alignment.BottomEnd)
@@ -326,21 +345,17 @@ fun MapPickerDialog(
                             verticalArrangement = Arrangement.spacedBy(10.dp),
                             horizontalAlignment = Alignment.End
                         ) {
-                            // Layer Toggle (Standard / Satellite)
+                            // Layer Switcher Button (Opens 16-Layer Picker)
                             FloatingActionButton(
-                                onClick = {
-                                    val nextMode = !isSatellite
-                                    isSatellite = nextMode
-                                    webViewRef?.evaluateJavascript("if (window.setMapType) { window.setMapType($nextMode); }", null)
-                                },
+                                onClick = { showLayerPickerSheet = true },
                                 containerColor = SurfaceCard,
-                                contentColor = if (isSatellite) TealDark else TextSecondary,
-                                modifier = Modifier.size(44.dp)
+                                contentColor = TealDark,
+                                modifier = Modifier.size(46.dp)
                             ) {
                                 Icon(
-                                    Icons.Default.Star,
-                                    contentDescription = if (isSatellite) "สลับเป็นแผนที่ปกติ" else "สลับเป็นดาวเทียม",
-                                    modifier = Modifier.size(20.dp)
+                                    Icons.Default.List,
+                                    contentDescription = "เลือกชนิดแผนที่ (${selectedProvider.name})",
+                                    modifier = Modifier.size(22.dp)
                                 )
                             }
 
@@ -349,7 +364,7 @@ fun MapPickerDialog(
                                 onClick = { handleCurrentLocationClick() },
                                 containerColor = SurfaceCard,
                                 contentColor = if (isLocating) TealPrimary else TextSecondary,
-                                modifier = Modifier.size(44.dp)
+                                modifier = Modifier.size(46.dp)
                             ) {
                                 if (isLocating) {
                                     CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp, color = TealPrimary)
@@ -357,7 +372,7 @@ fun MapPickerDialog(
                                     Icon(
                                         Icons.Default.LocationOn,
                                         contentDescription = "ตำแหน่งปัจจุบันของฉัน",
-                                        modifier = Modifier.size(20.dp)
+                                        modifier = Modifier.size(22.dp)
                                     )
                                 }
                             }
@@ -384,19 +399,112 @@ fun MapPickerDialog(
                                 Text("ยกเลิก", color = TextSecondary)
                             }
                             Button(
-                                onClick = { onConfirm(currentLat, currentLng) },
-                                modifier = Modifier.weight(2f),
-                                colors = ButtonDefaults.buttonColors(containerColor = TealPrimary),
-                                shape = RoundedCornerShape(8.dp)
+                                onClick = {
+                                    onConfirm(currentLat, currentLng)
+                                },
+                                modifier = Modifier.weight(1.5f),
+                                shape = RoundedCornerShape(8.dp),
+                                colors = ButtonDefaults.buttonColors(containerColor = TealPrimary)
                             ) {
                                 Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(18.dp))
                                 Spacer(modifier = Modifier.width(6.dp))
-                                Text("ยืนยันพิกัดนี้", fontWeight = FontWeight.Bold, color = Color.White)
+                                Text("ใช้พิกัดนี้", fontWeight = FontWeight.Bold)
                             }
                         }
                     }
                 }
             }
         }
+    }
+
+    // 16-Provider Map Layer Selector Dialog
+    if (showLayerPickerSheet) {
+        AlertDialog(
+            onDismissRequest = { showLayerPickerSheet = false },
+            title = {
+                Text(
+                    "เลือกรูปแบบแผนที่ (16 ชนิด)",
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 16.sp
+                )
+            },
+            text = {
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 420.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    val grouped = MapProviderRegistry.PROVIDERS.groupBy { it.category }
+
+                    grouped.forEach { (cat, providers) ->
+                        val catLabel = when (cat) {
+                            "satellite" -> "ภาพถ่ายดาวเทียม (Satellite)"
+                            "street" -> "แผนที่ถนนและการนำทาง (Street)"
+                            "topo" -> "ภูมิประเทศและความสูง (Topo & Terrain)"
+                            else -> "แผนที่เฉพาะทาง (Specialized)"
+                        }
+
+                        item {
+                            Text(
+                                catLabel,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = TealDark,
+                                modifier = Modifier.padding(top = 10.dp, bottom = 4.dp)
+                            )
+                        }
+
+                        items(providers) { provider ->
+                            val isSelected = provider.id == selectedProvider.id
+                            Surface(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        applyMapProvider(provider, saveAsDefault = true)
+                                        showLayerPickerSheet = false
+                                    },
+                                shape = RoundedCornerShape(6.dp),
+                                color = if (isSelected) TealContainer else Color.Transparent
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    RadioButton(
+                                        selected = isSelected,
+                                        onClick = {
+                                            applyMapProvider(provider, saveAsDefault = true)
+                                            showLayerPickerSheet = false
+                                        }
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            provider.name,
+                                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                                            fontSize = 13.sp,
+                                            color = if (isSelected) TealDark else TextPrimary
+                                        )
+                                        if (provider.description.isNotBlank()) {
+                                            Text(
+                                                provider.description,
+                                                fontSize = 11.sp,
+                                                color = TextSecondary
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showLayerPickerSheet = false }) {
+                    Text("ปิด")
+                }
+            }
+        )
     }
 }

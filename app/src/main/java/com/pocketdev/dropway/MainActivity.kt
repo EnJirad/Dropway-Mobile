@@ -17,7 +17,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.pocketdev.dropway.data.local.LocalHouseDatabase
 import com.pocketdev.dropway.data.local.PreferencesManager
-import com.pocketdev.dropway.data.remote.NeonClient
 import com.pocketdev.dropway.data.repository.LocalHouseRepository
 import com.pocketdev.dropway.data.sharing.SharingManager
 import com.pocketdev.dropway.ui.screens.HousesScreen
@@ -29,7 +28,6 @@ import com.pocketdev.dropway.ui.theme.*
 class MainActivity : ComponentActivity() {
 
     private lateinit var prefs: PreferencesManager
-    private lateinit var neonClient: NeonClient
     private lateinit var localDb: LocalHouseDatabase
     private lateinit var houseRepo: LocalHouseRepository
     private lateinit var sharingManager: SharingManager
@@ -38,16 +36,14 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
 
         prefs = PreferencesManager(applicationContext)
-        neonClient = NeonClient { prefs.databaseUrl }
         localDb = LocalHouseDatabase.getInstance(applicationContext)
-        houseRepo = LocalHouseRepository(applicationContext, localDb, neonClient, prefs)
+        houseRepo = LocalHouseRepository(applicationContext, localDb, prefs)
         sharingManager = SharingManager(applicationContext, prefs, localDb)
 
         setContent {
             DropwayTheme {
                 MainApp(
                     prefs = prefs,
-                    neonClient = neonClient,
                     houseRepo = houseRepo,
                     sharingManager = sharingManager
                 )
@@ -67,12 +63,10 @@ enum class ScreenTab(val title: String) {
 @Composable
 fun MainApp(
     prefs: PreferencesManager,
-    neonClient: NeonClient,
     houseRepo: LocalHouseRepository,
     sharingManager: SharingManager
 ) {
     var currentTab by remember { mutableStateOf(ScreenTab.HOUSES) }
-    var isDbConfigured by remember { mutableStateOf(prefs.isConfigured()) }
 
     Scaffold(
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
@@ -151,7 +145,6 @@ fun MainApp(
                     HousesScreen(
                         houseRepo = houseRepo,
                         sharingManager = sharingManager,
-                        neonClient = neonClient,
                         prefs = prefs,
                         onNavigateToSettings = { currentTab = ScreenTab.SETTINGS },
                         onNavigateToNavigation = { currentTab = ScreenTab.NAVIGATION }
@@ -159,7 +152,7 @@ fun MainApp(
                 }
                 ScreenTab.SCAN -> {
                     ScanScreen(
-                        neonClient = neonClient,
+                        houseRepo = houseRepo,
                         prefs = prefs,
                         onNavigateToQueue = { currentTab = ScreenTab.NAVIGATION },
                         onNavigateToSettings = { currentTab = ScreenTab.SETTINGS }
@@ -167,18 +160,15 @@ fun MainApp(
                 }
                 ScreenTab.NAVIGATION -> {
                     NavigationScreen(
-                        neonClient = neonClient,
+                        houseRepo = houseRepo,
                         prefs = prefs,
                         onNavigateToSettings = { currentTab = ScreenTab.SETTINGS }
                     )
                 }
                 ScreenTab.SETTINGS -> {
                     SettingsScreen(
-                        neonClient = neonClient,
-                        prefs = prefs,
-                        onConnectionUpdated = {
-                            isDbConfigured = prefs.isConfigured()
-                        }
+                        houseRepo = houseRepo,
+                        prefs = prefs
                     )
                 }
             }

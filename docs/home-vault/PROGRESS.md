@@ -14,6 +14,36 @@ This document tracks execution progress, verified criteria, and open tasks for t
 - **Part 5 — Ownership, Creator Identity & Shared Data Model:** ✅ COMPLETED
 - **Part 6 — Subscription-Based Secure Sharing:** ✅ COMPLETED
 - **Part 7 — QA, Regression, Security & Release:** ✅ COMPLETED
+- **Dropway 2.0 — Offline-First Secure Vault, .dwv Sharing & 16-Map Provider Engine:** ✅ COMPLETED
+
+---
+
+## Dropway Mobile 2.0 Implementation Checklist
+
+- [x] **Complete Elimination of Neon Database:**
+  - [x] Removed `NeonClient.kt` and all remote PostgreSQL network dependencies.
+  - [x] Expanded local SQLite database to manage `navigation_stops`, `scanned_parcels`, and `subscription_licenses`.
+  - [x] All CRUD operations in Navigation, Scan, Houses, and Settings operate 100% offline.
+- [x] **Database Security & Anti-Extraction Protection:**
+  - [x] Set `android:allowBackup="false"` in `AndroidManifest.xml` to prevent adb backup dumping.
+  - [x] Isolated database in internal private app storage.
+  - [x] Hardware-backed `AndroidKeyStore` AES-256-GCM encryption in `VaultCryptoManager.kt`.
+- [x] **Proprietary Encrypted Sharing (`.dwv` - Dropway Vault):**
+  - [x] Replaced plain JSON/CSV export with sealed binary `.dwv` container format (`DWVAULT02`).
+  - [x] Compressed with ZLIB, encrypted with AES-256-GCM, and signed with SHA-256 checksums.
+  - [x] Embedded creator attribution (`creatorId`, `creatorName`, `vaultTitle`, `recordCount`).
+- [x] **Subscription Monetization & Creator Attribution:**
+  - [x] Delivery drivers own and author their house pins and delivery routes.
+  - [x] Non-subscribing recipients receive a subscription paywall when importing `.dwv` files.
+  - [x] Offline licensing engine with signed activation codes (`DW-PRO-...`).
+  - [x] Expired subscriptions lock shared houses without deleting personal user records.
+- [x] **16-Provider Multi-Layer Map Engine:**
+  - [x] Default map set to **Google Maps (ดาวเทียม)** (`google_satellite`) per user specification.
+  - [x] Registered all 16 providers in `MapProviderRegistry.kt` (Google Satellite, Hybrid, Road, Terrain, Traffic, OSM, ESRI Suite, OpenTopoMap, Wikimedia, IGN France).
+  - [x] Interactive Leaflet layer switching in `MapPickerDialog.kt` with category-based picker dialog.
+- [x] **Build & Release:**
+  - [x] Debug APK assembled successfully (`app-debug.apk` ~29.5 MB).
+  - [x] Git committed and pushed to remote origin on `main`.
 
 ---
 

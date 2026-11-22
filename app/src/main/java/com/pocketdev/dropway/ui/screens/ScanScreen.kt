@@ -29,9 +29,8 @@ import com.pocketdev.dropway.data.model.House
 import com.pocketdev.dropway.data.model.LabelFields
 import com.pocketdev.dropway.data.model.MatchResult
 import com.pocketdev.dropway.data.model.SameParcelMeta
-import com.pocketdev.dropway.data.remote.DuplicateParcelException
 import com.pocketdev.dropway.data.remote.GeminiVisionClient
-import com.pocketdev.dropway.data.remote.NeonClient
+import com.pocketdev.dropway.data.repository.LocalHouseRepository
 import com.pocketdev.dropway.ui.components.BlockingLoader
 import com.pocketdev.dropway.ui.components.CameraViewfinder
 import com.pocketdev.dropway.ui.components.ConfirmActionDialog
@@ -50,7 +49,7 @@ import java.util.UUID
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ScanScreen(
-    neonClient: NeonClient,
+    houseRepo: LocalHouseRepository,
     prefs: PreferencesManager,
     onNavigateToQueue: () -> Unit,
     onNavigateToSettings: () -> Unit = {}
@@ -88,12 +87,9 @@ fun ScanScreen(
     // Cooldown timestamp to prevent immediate duplicate re-scanning
     var cooldownUntil by remember { mutableStateOf(0L) }
 
-    // Load houses from Neon on mount
+    // Load houses from local vault on mount
     LaunchedEffect(Unit) {
-        if (prefs.isConfigured()) {
-            val res = neonClient.getHouses(null)
-            res.onSuccess { houses = it }
-        }
+        houses = houseRepo.getHouses()
     }
 
     // Process scan from image or text
@@ -141,7 +137,7 @@ fun ScanScreen(
 
                 // 2. Check duplicate parcel in queue
                 if (effectiveTracking != null) {
-                    val dupRes = neonClient.checkExistingParcel(effectiveTracking)
+                    val dupRes = houseRepo.checkExistingParcel(effectiveTracking)
                     dupRes.onSuccess { sp ->
                         sameParcel = sp
                     }
@@ -209,15 +205,19 @@ fun ScanScreen(
         scope.launch {
             val tracking = form.tracking.trim().takeIf { it.isNotBlank() }
             val fullAddr = LabelParser.composeAddress(form.houseNo, form.address, form.postalCode)
+            val targetHouse = matchedHouse ?: House(
+                id = UUID.randomUUID().toString(),
+                fullName = form.name.trim().takeIf { it.isNotBlank() },
+                phone = form.phone.trim().takeIf { it.isNotBlank() },
+                address = fullAddr.takeIf { it.isNotBlank() },
+                lat = null,
+                lng = null
+            )
 
-            val addRes = neonClient.addToNavigation(
-                houseId = matchedHouse?.id,
+            val addRes = houseRepo.addToNavigation(
+                house = targetHouse,
                 trackingNumber = tracking,
-                destName = form.name.trim().takeIf { it.isNotBlank() } ?: matchedHouse?.fullName,
-                destPhone = form.phone.trim().takeIf { it.isNotBlank() } ?: matchedHouse?.phone,
-                destAddress = fullAddr.takeIf { it.isNotBlank() } ?: matchedHouse?.address,
-                userId = prefs.userId,
-                force = force
+                navNote = null
             )
 
             isAddingToNav = false
@@ -231,23 +231,12 @@ fun ScanScreen(
                 sheetOpen = false
                 cooldownUntil = System.currentTimeMillis() + 1800 // AUTO_COOLDOWN_MS
             }.onFailure { err ->
-                if (err is DuplicateParcelException) {
-                    SoundFeedback.playWarningSound(context)
-                    if (err.sameStop) {
-                        Toast.makeText(context, "บ้านนี้มีพัสดุเลขนี้ในคิวแล้ว", Toast.LENGTH_LONG).show()
-                    } else {
-                        // Prompt duplicate confirm dialog
-                        pendingDuplicateForm = form
-                        showDuplicateConfirmDialog = true
-                    }
-                } else {
-                    Toast.makeText(context, "เพิ่มไม่สำเร็จ: ${err.message}", Toast.LENGTH_SHORT).show()
-                }
+                Toast.makeText(context, "เพิ่มไม่สำเร็จ: ${err.message}", Toast.LENGTH_SHORT).show()
             }
         }
     }
 
-    // Save or update house in Neon
+    // Save or update house in local vault
     fun handleSaveHouse(form: LabelFields, noteText: String) {
         if (isAddingToNav) return
         isAddingToNav = true
@@ -259,30 +248,25 @@ fun ScanScreen(
                 fullName = form.name.trim().takeIf { it.isNotBlank() } ?: matchedHouse?.fullName,
                 phone = form.phone.trim().takeIf { it.isNotBlank() } ?: matchedHouse?.phone,
                 address = fullAddr.takeIf { it.isNotBlank() } ?: matchedHouse?.address,
-                lat = matchedHouse?.lat ?: 0.0,
-                lng = matchedHouse?.lng ?: 0.0,
+                lat = matchedHouse?.lat,
+                lng = matchedHouse?.lng,
                 note = noteText.trim().takeIf { it.isNotBlank() } ?: matchedHouse?.note,
                 quantity = matchedHouse?.quantity ?: 1
             )
 
-            val res = if (matchedHouse != null) {
-                neonClient.updateHouse(houseToSave)
-            } else {
-                neonClient.createHouse(houseToSave)
-            }
+            val res = houseRepo.saveHouse(houseToSave)
 
             isAddingToNav = false
 
-            res.onSuccess {
-                matchedHouse = houseToSave
+            res.onSuccess { saved ->
+                matchedHouse = saved
                 primaryMatch = null
                 SoundFeedback.playSuccessSound(context)
                 Toast.makeText(context, if (matchedHouse != null) "บันทึกการแก้ไขแล้ว" else "บันทึกเป็นบ้านใหม่แล้ว", Toast.LENGTH_SHORT).show()
                 // Refresh houses cache
-                val refresh = neonClient.getHouses(null)
-                refresh.onSuccess { houses = it }
-            }.onFailure {
-                Toast.makeText(context, "บันทึกไม่สำเร็จ: ${it.message}", Toast.LENGTH_SHORT).show()
+                houses = houseRepo.getHouses()
+            }.onFailure { err ->
+                Toast.makeText(context, "บันทึกไม่สำเร็จ: ${err.message}", Toast.LENGTH_SHORT).show()
             }
         }
     }

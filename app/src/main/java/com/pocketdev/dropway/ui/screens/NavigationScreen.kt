@@ -22,7 +22,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.pocketdev.dropway.data.local.PreferencesManager
 import com.pocketdev.dropway.data.model.NavigationHouse
-import com.pocketdev.dropway.data.remote.NeonClient
+import com.pocketdev.dropway.data.repository.LocalHouseRepository
 import com.pocketdev.dropway.ui.components.ConfirmActionDialog
 import com.pocketdev.dropway.ui.components.DeliveryStatusBadge
 import com.pocketdev.dropway.ui.components.EditDriverNoteDialog
@@ -34,7 +34,7 @@ import kotlinx.coroutines.launch
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun NavigationScreen(
-    neonClient: NeonClient,
+    houseRepo: LocalHouseRepository,
     prefs: PreferencesManager,
     onNavigateToSettings: () -> Unit
 ) {
@@ -55,14 +55,10 @@ fun NavigationScreen(
     var showClearAllConfirm by remember { mutableStateOf(false) }
 
     fun loadStops() {
-        if (!prefs.isConfigured()) {
-            errorMessage = "กรุณาตั้งค่า Neon Database URL ในหน้าตั้งค่าก่อนใช้งาน"
-            return
-        }
         isLoading = true
         errorMessage = null
         scope.launch {
-            val res = neonClient.getNavigationStops(prefs.userId)
+            val res = houseRepo.getNavigationStops()
             isLoading = false
             res.onSuccess {
                 stops = it
@@ -290,7 +286,7 @@ fun NavigationScreen(
                             onCall = { DriverActions.openPhoneDialer(context, stop.phone) },
                             onMarkDelivered = {
                                 scope.launch {
-                                    val res = neonClient.updateDeliveryStatus(stop.navId, "delivered")
+                                    val res = houseRepo.updateDeliveryStatus(stop.navId, "delivered")
                                     res.onSuccess {
                                         Toast.makeText(context, "บันทึก: ส่งสำเร็จแล้ว", Toast.LENGTH_SHORT).show()
                                         loadStops()
@@ -302,7 +298,7 @@ fun NavigationScreen(
                             onOpenReportDialog = { reportingStop = stop },
                             onRevertStatus = {
                                 scope.launch {
-                                    val res = neonClient.updateDeliveryStatus(stop.navId, "pending")
+                                    val res = houseRepo.updateDeliveryStatus(stop.navId, "pending")
                                     res.onSuccess {
                                         Toast.makeText(context, "คืนสถานะเป็น: รอดำเนินการ", Toast.LENGTH_SHORT).show()
                                         loadStops()
@@ -327,7 +323,7 @@ fun NavigationScreen(
             onConfirm = { reason, note ->
                 reportingStop = null
                 scope.launch {
-                    val res = neonClient.updateDeliveryStatus(stop.navId, "reported", deliveryNote = note, reportReason = reason)
+                    val res = houseRepo.updateDeliveryStatus(stop.navId, "reported", deliveryNote = note, reportReason = reason)
                     res.onSuccess {
                         Toast.makeText(context, "บันทึกปัญหาเรียบร้อย", Toast.LENGTH_SHORT).show()
                         loadStops()
@@ -347,7 +343,7 @@ fun NavigationScreen(
             onSave = { newNote ->
                 editingNoteStop = null
                 scope.launch {
-                    val res = neonClient.updateDriverNote(stop.navId, newNote)
+                    val res = houseRepo.updateDriverNote(stop.navId, newNote)
                     res.onSuccess {
                         Toast.makeText(context, "บันทึกโน้ตแล้ว", Toast.LENGTH_SHORT).show()
                         loadStops()
@@ -370,7 +366,7 @@ fun NavigationScreen(
             onConfirm = {
                 deletingStop = null
                 scope.launch {
-                    val res = neonClient.deleteNavigationStop(stop.navId)
+                    val res = houseRepo.deleteNavigationStop(stop.navId)
                     res.onSuccess {
                         Toast.makeText(context, "ลบจุดส่งแล้ว", Toast.LENGTH_SHORT).show()
                         loadStops()
@@ -392,7 +388,7 @@ fun NavigationScreen(
             onConfirm = {
                 showClearDeliveredConfirm = false
                 scope.launch {
-                    val res = neonClient.clearDeliveredStops(prefs.userId)
+                    val res = houseRepo.clearDeliveredStops()
                     res.onSuccess {
                         Toast.makeText(context, "ล้างรายการสำเร็จแล้ว", Toast.LENGTH_SHORT).show()
                         loadStops()
@@ -415,7 +411,7 @@ fun NavigationScreen(
             onConfirm = {
                 showClearAllConfirm = false
                 scope.launch {
-                    val res = neonClient.clearAllStops(prefs.userId)
+                    val res = houseRepo.clearAllStops()
                     res.onSuccess {
                         Toast.makeText(context, "ล้างคิวทั้งหมดแล้ว", Toast.LENGTH_SHORT).show()
                         loadStops()

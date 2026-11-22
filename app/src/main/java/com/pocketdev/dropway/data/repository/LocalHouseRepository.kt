@@ -1,13 +1,13 @@
 package com.pocketdev.dropway.data.repository
 
 import android.content.Context
-import android.content.Intent
-import android.net.Uri
-import androidx.core.content.FileProvider
 import com.pocketdev.dropway.data.local.LocalHouseDatabase
 import com.pocketdev.dropway.data.local.PreferencesManager
 import com.pocketdev.dropway.data.model.House
-import com.pocketdev.dropway.data.remote.NeonClient
+import com.pocketdev.dropway.data.model.NavigationHouse
+import com.pocketdev.dropway.data.model.SameParcelMeta
+import com.pocketdev.dropway.data.sharing.VaultCryptoManager
+import com.pocketdev.dropway.data.sharing.VaultMetadata
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -16,96 +16,133 @@ import java.util.Date
 import java.util.Locale
 
 /**
- * Repository providing Offline-First access to Home Vault.
- * All core operations (Read, Create, Update, Delete, Search) operate against local SQLite.
+ * Repository providing 100% Offline-First access to Dropway Mobile Vault & Navigation.
+ * All operations operate against local SQLite storage with zero remote server dependency.
  */
 class LocalHouseRepository(
     private val context: Context,
     private val localDb: LocalHouseDatabase,
-    private val neonClient: NeonClient,
     private val prefs: PreferencesManager
 ) {
 
-    /**
-     * Initializes local repository: seeds 4,530 houses from assets if local database is empty.
-     */
     suspend fun initialize(): Int = withContext(Dispatchers.IO) {
         localDb.seedFromAssetsIfEmpty()
     }
 
-    /**
-     * Retrieves all houses from local storage.
-     */
     suspend fun getHouses(sourceType: String? = null): List<House> = withContext(Dispatchers.IO) {
         localDb.getAllHouses(sourceType)
     }
 
-    /**
-     * Saves or updates a house in local storage, preserving creator identity.
-     */
     suspend fun saveHouse(house: House): Result<House> = withContext(Dispatchers.IO) {
         runCatching {
             val creatorId = house.creatorId ?: prefs.userId
-            val creatorName = house.creatorName ?: "User-${prefs.userId.takeLast(4)}"
+            val creatorName = house.creatorName ?: prefs.driverName
             val prepared = house.copy(
                 creatorId = creatorId,
                 creatorName = creatorName,
                 sourceType = house.sourceType
             )
             localDb.upsertHouse(prepared, creatorId, creatorName)
-
-            // Optional background remote sync if Neon DB is configured
-            if (prefs.isConfigured()) {
-                try {
-                    neonClient.createHouse(prepared)
-                } catch (_: Exception) {}
-            }
             prepared
         }
     }
 
-    /**
-     * Deletes a house from local storage.
-     */
     suspend fun deleteHouse(houseId: String): Result<Unit> = withContext(Dispatchers.IO) {
         runCatching {
             localDb.deleteHouse(houseId)
-
-            // Optional background remote deletion if Neon DB is configured
-            if (prefs.isConfigured()) {
-                try {
-                    neonClient.deleteHouse(houseId)
-                } catch (_: Exception) {}
-            }
             Unit
         }
     }
 
-    /**
-     * Exports local vault to a shareable JSON backup file.
-     */
-    suspend fun exportBackupFile(): Result<File> = withContext(Dispatchers.IO) {
+    suspend fun getHouseCount(): Int = withContext(Dispatchers.IO) {
+        localDb.getHouseCount()
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Navigation Operations
+    // -----------------------------------------------------------------------------------------
+
+    suspend fun getNavigationStops(): Result<List<NavigationHouse>> = withContext(Dispatchers.IO) {
         runCatching {
-            val jsonText = localDb.exportToJson(prefs.userId)
-            val dateStr = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
-            val exportDir = File(context.cacheDir, "backups").apply { mkdirs() }
-            val backupFile = File(exportDir, "dropway_backup_$dateStr.json")
-            backupFile.writeText(jsonText, Charsets.UTF_8)
-            backupFile
+            localDb.getNavigationStops(prefs.userId)
         }
     }
 
-    /**
-     * Imports houses from a JSON backup string with validation.
-     */
-    suspend fun importBackup(jsonText: String): LocalHouseDatabase.ImportResult = withContext(Dispatchers.IO) {
-        localDb.importFromJson(jsonText)
+    suspend fun addToNavigation(
+        house: House,
+        trackingNumber: String? = null,
+        navNote: String? = null
+    ): Result<String> = withContext(Dispatchers.IO) {
+        runCatching {
+            localDb.addToNavigation(house, trackingNumber, navNote, prefs.userId)
+        }
     }
 
-    /**
-     * Returns total count of houses in local vault.
-     */
-    suspend fun getHouseCount(): Int = withContext(Dispatchers.IO) {
-        localDb.getHouseCount()
+    suspend fun updateDeliveryStatus(
+        navId: String,
+        status: String,
+        deliveryNote: String? = null,
+        reportReason: String? = null
+    ): Result<Boolean> = withContext(Dispatchers.IO) {
+        runCatching {
+            localDb.updateDeliveryStatus(navId, status, deliveryNote, reportReason)
+        }
+    }
+
+    suspend fun updateDriverNote(navId: String, note: String): Result<Boolean> = withContext(Dispatchers.IO) {
+        runCatching {
+            localDb.updateDriverNote(navId, note)
+        }
+    }
+
+    suspend fun deleteNavigationStop(navId: String): Result<Boolean> = withContext(Dispatchers.IO) {
+        runCatching {
+            localDb.deleteNavigationStop(navId)
+        }
+    }
+
+    suspend fun clearDeliveredStops(): Result<Int> = withContext(Dispatchers.IO) {
+        runCatching {
+            localDb.clearDeliveredStops(prefs.userId)
+        }
+    }
+
+    suspend fun clearAllStops(): Result<Int> = withContext(Dispatchers.IO) {
+        runCatching {
+            localDb.clearAllStops(prefs.userId)
+        }
+    }
+
+    suspend fun checkExistingParcel(trackingNumber: String): Result<SameParcelMeta?> = withContext(Dispatchers.IO) {
+        runCatching {
+            localDb.checkExistingParcel(trackingNumber)
+        }
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Proprietary .dwv Encrypted Sharing Container
+    // -----------------------------------------------------------------------------------------
+
+    suspend fun exportDwvVault(vaultTitle: String): Result<File> = withContext(Dispatchers.IO) {
+        runCatching {
+            val bytes = localDb.exportToDwv(
+                vaultTitle = vaultTitle,
+                creatorId = prefs.userId,
+                creatorName = prefs.driverName
+            )
+            val exportDir = File(context.cacheDir, "exports").apply { mkdirs() }
+            val dateStr = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+            val file = File(exportDir, "Dropway_${prefs.driverName}_$dateStr.dwv")
+            file.writeBytes(bytes)
+            file
+        }
+    }
+
+    suspend fun inspectDwv(bytes: ByteArray): VaultMetadata? = withContext(Dispatchers.Default) {
+        VaultCryptoManager.inspectVaultHeader(bytes)
+    }
+
+    suspend fun importDwvVault(bytes: ByteArray): Result<LocalHouseDatabase.DwvImportResult> = withContext(Dispatchers.IO) {
+        localDb.importFromDwv(bytes, prefs.isSubscribed)
     }
 }
