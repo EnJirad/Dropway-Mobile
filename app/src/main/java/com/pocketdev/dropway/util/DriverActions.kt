@@ -1,0 +1,55 @@
+package com.pocketdev.dropway.util
+
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.widget.Toast
+
+object DriverActions {
+
+    fun openMapNavigation(context: Context, lat: Double?, lng: Double?, address: String?, name: String?) {
+        try {
+            if (lat != null && lng != null && lat != 0.0 && lng != 0.0) {
+                // Try Google Maps turn-by-turn navigation first
+                val navUri = Uri.parse("google.navigation:q=$lat,$lng&mode=d")
+                val navIntent = Intent(Intent.ACTION_VIEW, navUri).apply {
+                    setPackage("com.google.android.apps.maps")
+                }
+                if (navIntent.resolveActivity(context.packageManager) != null) {
+                    context.startActivity(navIntent)
+                    return
+                }
+
+                // Fallback to geo URI
+                val label = Uri.encode(name ?: address ?: "จุดส่งพัสดุ")
+                val geoUri = Uri.parse("geo:$lat,$lng?q=$lat,$lng($label)")
+                val mapIntent = Intent(Intent.ACTION_VIEW, geoUri)
+                context.startActivity(mapIntent)
+            } else if (!address.isNullOrBlank()) {
+                // Search by address
+                val encodedAddress = Uri.encode(address)
+                val webUri = Uri.parse("https://www.google.com/maps/search/?api=1&query=$encodedAddress")
+                val mapIntent = Intent(Intent.ACTION_VIEW, webUri)
+                context.startActivity(mapIntent)
+            } else {
+                Toast.makeText(context, "ไม่มีข้อมูลพิกัดหรือที่อยู่สำหรับนำทาง", Toast.LENGTH_SHORT).show()
+            }
+        } catch (e: Exception) {
+            Toast.makeText(context, "ไม่สามารถเปิดแอพแผนที่ได้: ${e.message}", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    fun openPhoneDialer(context: Context, phone: String?) {
+        if (phone.isNullOrBlank()) {
+            Toast.makeText(context, "ไม่มีเบอร์โทรศัพท์สำหรับติดต่อ", Toast.LENGTH_SHORT).show()
+            return
+        }
+        try {
+            val cleanPhone = phone.replace(Regex("[^0-9+]"), "")
+            val intent = Intent(Intent.ACTION_DIAL, Uri.parse("tel:$cleanPhone"))
+            context.startActivity(intent)
+        } catch (e: Exception) {
+            Toast.makeText(context, "ไม่สามารถโทรออกได้: ${e.message}", Toast.LENGTH_SHORT).show()
+        }
+    }
+}
