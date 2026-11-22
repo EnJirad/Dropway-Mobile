@@ -216,21 +216,26 @@ fun MapPickerDialog(
                                     val initSubs = selectedProvider.subdomains
                                     val initZoomMax = selectedProvider.maxZoom
 
+                                    val leafletCss = com.pocketdev.dropway.util.MapAssetLoader.getLeafletCss(ctx)
+                                    val leafletJs = com.pocketdev.dropway.util.MapAssetLoader.getLeafletJs(ctx)
+
                                     val htmlContent = """
                                         <!DOCTYPE html>
                                         <html>
                                         <head>
                                             <meta charset="utf-8" />
                                             <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-                                            <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-                                            <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
                                             <style>
+                                                $leafletCss
                                                 html, body, #map { height: 100%; width: 100%; margin: 0; padding: 0; background: #1a1a1a; }
                                                 .leaflet-control-attribution { display: none !important; }
                                             </style>
                                         </head>
                                         <body>
                                             <div id="map"></div>
+                                            <script>
+                                                $leafletJs
+                                            </script>
                                             <script>
                                                 var currentTileLayer = L.tileLayer('$initUrl', {
                                                     maxZoom: $initZoomMax,

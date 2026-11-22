@@ -4,14 +4,15 @@ package com.pocketdev.dropway.ui.components
 import android.Manifest
 import android.annotation.SuppressLint
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.location.Location
 import android.location.LocationListener
 import android.location.LocationManager
+import android.net.http.SslError
 import android.os.Bundle
-import android.webkit.JavascriptInterface
-import android.webkit.WebView
-import android.webkit.WebViewClient
+import android.provider.Settings
+import android.webkit.*
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -41,6 +42,7 @@ import com.pocketdev.dropway.data.model.NavigationHouse
 import com.pocketdev.dropway.ui.theme.*
 import com.pocketdev.dropway.util.CoordinateHelper
 import com.pocketdev.dropway.util.DriverActions
+import com.pocketdev.dropway.util.MapAssetLoader
 import com.pocketdev.dropway.util.MapProviderRegistry
 import com.pocketdev.dropway.util.SoundFeedback
 import org.json.JSONArray
@@ -87,11 +89,46 @@ fun DeliveryHudView(
     // Driver GPS Location state
     var driverLat by remember { mutableStateOf<Double?>(null) }
     var driverLng by remember { mutableStateOf<Double?>(null) }
+    var isGpsDisabled by remember { mutableStateOf(false) }
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
     var hasAlertedForNavId by remember { mutableStateOf<String?>(null) }
 
-    val selectedProvider = remember {
-        MapProviderRegistry.getById(prefs.defaultMapLayer)
+    // Map layer cycle: Satellite -> Road -> Hybrid -> OSM
+    var currentProviderIndex by remember {
+        val defaultIdx = MapProviderRegistry.PROVIDERS.indexOfFirst { it.id == prefs.defaultMapLayer }
+        mutableStateOf(if (defaultIdx >= 0) defaultIdx else 0)
+    }
+    val selectedProvider = MapProviderRegistry.PROVIDERS[currentProviderIndex]
+
+    // Location permission state & launcher
+    var hasLocationPermission by remember {
+        mutableStateOf(
+            ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
+            ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
+        )
+    }
+
+    val permissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestMultiplePermissions()
+    ) { perms ->
+        val fineGranted = perms[Manifest.permission.ACCESS_FINE_LOCATION] == true
+        val coarseGranted = perms[Manifest.permission.ACCESS_COARSE_LOCATION] == true
+        if (fineGranted || coarseGranted) {
+            hasLocationPermission = true
+        } else {
+            Toast.makeText(context, "กรุณาเปิดสิทธิ์ GPS เพื่อให้นำทางได้", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        if (!hasLocationPermission) {
+            permissionLauncher.launch(
+                arrayOf(
+                    Manifest.permission.ACCESS_FINE_LOCATION,
+                    Manifest.permission.ACCESS_COARSE_LOCATION
+                )
+            )
+        }
     }
 
     // Distance calculation to current target
@@ -111,50 +148,67 @@ fun DeliveryHudView(
         }
     }
 
-    // GPS Location Listener
-    DisposableEffect(Unit) {
+    // Real-Time GPS Tracking Engine (Queries both GPS & Network for immediate accuracy)
+    DisposableEffect(hasLocationPermission) {
+        if (!hasLocationPermission) return@DisposableEffect onDispose {}
+
         val locationManager = context.getSystemService(Context.LOCATION_SERVICE) as? LocationManager
-        val hasPermission = ContextCompat.checkSelfPermission(
-            context,
-            Manifest.permission.ACCESS_FINE_LOCATION
-        ) == PackageManager.PERMISSION_GRANTED
+        if (locationManager == null) return@DisposableEffect onDispose {}
+
+        val isGpsEnabled = locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)
+        val isNetworkEnabled = locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER)
+        isGpsDisabled = !isGpsEnabled && !isNetworkEnabled
 
         val listener = object : LocationListener {
             override fun onLocationChanged(loc: Location) {
                 driverLat = loc.latitude
                 driverLng = loc.longitude
-                // Update map center and driver pin
+                isGpsDisabled = false
                 val js = "if (window.updateDriverLocation) { window.updateDriverLocation(${loc.latitude}, ${loc.longitude}); }"
                 webViewRef?.evaluateJavascript(js, null)
             }
             override fun onStatusChanged(provider: String?, status: Int, extras: Bundle?) {}
-            override fun onProviderEnabled(provider: String) {}
-            override fun onProviderDisabled(provider: String) {}
+            override fun onProviderEnabled(provider: String) { isGpsDisabled = false }
+            override fun onProviderDisabled(provider: String) {
+                val gps = locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)
+                val net = locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER)
+                isGpsDisabled = !gps && !net
+            }
         }
 
-        if (hasPermission && locationManager != null) {
+        // 1. Immediately read last known location from best available provider
+        val providers = listOf(
+            LocationManager.GPS_PROVIDER,
+            LocationManager.NETWORK_PROVIDER,
+            LocationManager.PASSIVE_PROVIDER
+        )
+        var bestLocation: Location? = null
+        for (p in providers) {
             try {
-                if (locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
-                    locationManager.requestLocationUpdates(LocationManager.GPS_PROVIDER, 2000L, 5f, listener)
-                    val last = locationManager.getLastKnownLocation(LocationManager.GPS_PROVIDER)
-                    if (last != null) {
-                        driverLat = last.latitude
-                        driverLng = last.longitude
-                    }
-                } else if (locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) {
-                    locationManager.requestLocationUpdates(LocationManager.NETWORK_PROVIDER, 3000L, 5f, listener)
-                    val last = locationManager.getLastKnownLocation(LocationManager.NETWORK_PROVIDER)
-                    if (last != null) {
-                        driverLat = last.latitude
-                        driverLng = last.longitude
-                    }
+                val loc = locationManager.getLastKnownLocation(p)
+                if (loc != null && (bestLocation == null || loc.time > bestLocation.time)) {
+                    bestLocation = loc
+                }
+            } catch (_: SecurityException) {}
+        }
+
+        if (bestLocation != null) {
+            driverLat = bestLocation.latitude
+            driverLng = bestLocation.longitude
+        }
+
+        // 2. Request active updates on both GPS and Network providers
+        for (p in listOf(LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER)) {
+            try {
+                if (locationManager.isProviderEnabled(p)) {
+                    locationManager.requestLocationUpdates(p, 1000L, 2f, listener)
                 }
             } catch (_: SecurityException) {}
         }
 
         onDispose {
             try {
-                locationManager?.removeUpdates(listener)
+                locationManager.removeUpdates(listener)
             } catch (_: Exception) {}
         }
     }
@@ -187,19 +241,41 @@ fun DeliveryHudView(
         refreshMapMarkers()
     }
 
+    // Bundled offline Leaflet assets
+    val leafletCss = remember { MapAssetLoader.getLeafletCss(context) }
+    val leafletJs = remember { MapAssetLoader.getLeafletJs(context) }
+
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(Color(0xFF0F172A))
     ) {
-        // 1. Fullscreen Map (WebView)
+        // 1. Fullscreen Map (WebView with 100% Offline Bundled Leaflet)
         AndroidView(
             factory = { ctx ->
                 WebView(ctx).apply {
-                    settings.javaScriptEnabled = true
-                    settings.domStorageEnabled = true
-                    settings.useWideViewPort = true
-                    settings.loadWithOverviewMode = true
+                    settings.apply {
+                        javaScriptEnabled = true
+                        domStorageEnabled = true
+                        useWideViewPort = true
+                        loadWithOverviewMode = true
+                        mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+                        allowFileAccess = true
+                        allowContentAccess = true
+                        databaseEnabled = true
+                        cacheMode = WebSettings.LOAD_DEFAULT
+                    }
+
+                    webChromeClient = WebChromeClient()
+
+                    webViewClient = object : WebViewClient() {
+                        override fun onReceivedSslError(view: WebView?, handler: SslErrorHandler?, error: SslError?) {
+                            handler?.proceed()
+                        }
+                        override fun onPageFinished(view: WebView?, url: String?) {
+                            refreshMapMarkers()
+                        }
+                    }
 
                     addJavascriptInterface(object {
                         @JavascriptInterface
@@ -211,12 +287,6 @@ fun DeliveryHudView(
                             }
                         }
                     }, "AndroidBridge")
-
-                    webViewClient = object : WebViewClient() {
-                        override fun onPageFinished(view: WebView?, url: String?) {
-                            refreshMapMarkers()
-                        }
-                    }
 
                     val initUrl = selectedProvider.tileUrl
                     val initSubs = selectedProvider.subdomains
@@ -230,17 +300,10 @@ fun DeliveryHudView(
                         <head>
                             <meta charset="utf-8" />
                             <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-                            <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-                            <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
                             <style>
-                                html, body, #map { height: 100%; width: 100%; margin: 0; padding: 0; background: #0f172a; }
+                                $leafletCss
+                                html, body, #map { height: 100%; width: 100%; margin: 0; padding: 0; background: #1e293b; }
                                 .leaflet-control-attribution { display: none !important; }
-                                .driver-icon {
-                                    background: #0ea5e9;
-                                    border: 3px solid #ffffff;
-                                    border-radius: 50%;
-                                    box-shadow: 0 0 16px rgba(14, 165, 233, 0.9);
-                                }
                                 .stop-pin {
                                     border-radius: 50%;
                                     color: white;
@@ -295,19 +358,48 @@ fun DeliveryHudView(
                         <body>
                             <div id="map"></div>
                             <script>
+                                $leafletJs
+                            </script>
+                            <script>
+                                var currentTileLayer = L.tileLayer('$initUrl', {
+                                    maxZoom: $initMaxZoom,
+                                    subdomains: '$initSubs',
+                                    errorTileUrl: ''
+                                });
+
                                 var map = L.map('map', {
                                     center: [$startLat, $startLng],
                                     zoom: 17,
-                                    zoomControl: false
+                                    zoomControl: false,
+                                    layers: [currentTileLayer]
                                 });
-                                L.tileLayer('$initUrl', {
-                                    maxZoom: $initMaxZoom,
-                                    subdomains: '$initSubs'
-                                }).addTo(map);
 
                                 var driverMarker = null;
                                 var markersLayer = L.layerGroup().addTo(map);
                                 var routeLine = null;
+
+                                window.switchMapLayer = function(tileUrl, subdomains, maxZoom) {
+                                    if (currentTileLayer) {
+                                        map.removeLayer(currentTileLayer);
+                                    }
+                                    currentTileLayer = L.tileLayer(tileUrl, {
+                                        maxZoom: maxZoom || 19,
+                                        subdomains: subdomains || '0123'
+                                    });
+                                    map.addLayer(currentTileLayer);
+                                };
+
+                                window.centerOnLocation = function(lat, lng) {
+                                    map.setView([lat, lng], 17, { animate: true });
+                                };
+
+                                window.fitAllMarkers = function() {
+                                    if (markersLayer.getLayers().length > 0) {
+                                        var group = new L.featureGroup(markersLayer.getLayers());
+                                        if (driverMarker) group.addLayer(driverMarker);
+                                        map.fitBounds(group.getBounds().pad(0.15));
+                                    }
+                                };
 
                                 window.updateDriverLocation = function(lat, lng) {
                                     if (!driverMarker) {
@@ -385,80 +477,180 @@ fun DeliveryHudView(
             modifier = Modifier.fillMaxSize()
         )
 
-        // 2. Top Navigation Bar (Floating Glassmorphism Card)
-        Card(
+        // 2. Top Control Bar (Progress + Auto Route + Close)
+        Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 14.dp, vertical = 28.dp)
-                .align(Alignment.TopCenter),
-            shape = RoundedCornerShape(16.dp),
-            colors = CardDefaults.cardColors(containerColor = Color(0xEE1E293B)),
-            elevation = CardDefaults.cardElevation(defaultElevation = 8.dp)
+                .padding(horizontal = 14.dp, vertical = 24.dp)
+                .align(Alignment.TopCenter)
         ) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 12.dp, vertical = 10.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
+            // Warning if GPS is disabled on the phone
+            if (isGpsDisabled) {
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 8.dp),
+                    shape = RoundedCornerShape(10.dp),
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFFDC2626))
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Default.Warning, contentDescription = null, tint = Color.White, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("GPS ในเครื่องถูกปิดอยู่", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        }
+                        Button(
+                            onClick = {
+                                context.startActivity(Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS))
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = Color.White),
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                            shape = RoundedCornerShape(6.dp)
+                        ) {
+                            Text("เปิด GPS", color = Color(0xFFDC2626), fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+            }
+
+            // Glassmorphism HUD Bar
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = Color(0xEE1E293B)),
+                elevation = CardDefaults.cardElevation(defaultElevation = 8.dp)
             ) {
-                // Exit HUD Button
-                IconButton(
-                    onClick = onCloseHud,
+                Row(
                     modifier = Modifier
-                        .size(38.dp)
-                        .background(Color(0xFF334155), CircleShape)
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Icon(
-                        Icons.Default.ArrowBack,
-                        contentDescription = "กลับหน้ารายการ",
-                        tint = Color.White,
-                        modifier = Modifier.size(20.dp)
-                    )
-                }
+                    // Back to list button
+                    IconButton(
+                        onClick = onCloseHud,
+                        modifier = Modifier
+                            .size(38.dp)
+                            .background(Color(0xFF334155), CircleShape)
+                    ) {
+                        Icon(
+                            Icons.Default.ArrowBack,
+                            contentDescription = "กลับหน้ารายการ",
+                            tint = Color.White,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
 
-                // Progress Info
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text(
-                        text = if (currentTarget != null) "จุดที่ ${currentTargetIndex + 1} จาก ${pendingStops.size}" else "ส่งครบทุกจุดแล้ว",
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 15.sp,
-                        color = Color.White
-                    )
-                    Text(
-                        text = if (distanceToTargetMeters != null) "อีก ${CoordinateHelper.formatDistance(distanceToTargetMeters)}" else "กำลังจับสัญญาณ GPS...",
-                        fontSize = 12.sp,
-                        color = if (distanceToTargetMeters != null && distanceToTargetMeters <= 70) Color(0xFF10B981) else Color(0xFF94A3B8),
-                        fontWeight = FontWeight.SemiBold
-                    )
-                }
+                    // Progress info
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(
+                            text = if (currentTarget != null) "จุดที่ ${currentTargetIndex + 1} จาก ${pendingStops.size}" else "ส่งครบทุกจุดแล้ว",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 15.sp,
+                            color = Color.White
+                        )
+                        Text(
+                            text = if (distanceToTargetMeters != null) "อีก ${CoordinateHelper.formatDistance(distanceToTargetMeters)}"
+                            else if (driverLat != null) "ตรวจพบตำแหน่งคนขับแล้ว"
+                            else "กำลังค้นหาพิกัด GPS...",
+                            fontSize = 12.sp,
+                            color = if (distanceToTargetMeters != null && distanceToTargetMeters <= 70) Color(0xFF10B981) else Color(0xFF94A3B8),
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
 
-                // Auto Route Optimize Button
-                IconButton(
-                    onClick = {
-                        onOptimizeRoute(driverLat, driverLng)
-                        Toast.makeText(context, "จัดเรียงเส้นทางใกล้สุดเรียบร้อย", Toast.LENGTH_SHORT).show()
-                    },
-                    modifier = Modifier
-                        .size(38.dp)
-                        .background(TealDark, CircleShape)
-                ) {
-                    Icon(
-                        Icons.Default.PlayArrow,
-                        contentDescription = "จัดเรียงเส้นทางอัตโนมัติ",
-                        tint = Color.White,
-                        modifier = Modifier.size(22.dp)
-                    )
+                    // Auto Route Optimizer
+                    IconButton(
+                        onClick = {
+                            onOptimizeRoute(driverLat, driverLng)
+                            Toast.makeText(context, "จัดเรียงลำดับเส้นทางใกล้สุดสำเร็จ", Toast.LENGTH_SHORT).show()
+                        },
+                        modifier = Modifier
+                            .size(38.dp)
+                            .background(TealDark, CircleShape)
+                    ) {
+                        Icon(
+                            Icons.Default.PlayArrow,
+                            contentDescription = "จัดเรียงเส้นทางอัตโนมัติ",
+                            tint = Color.White,
+                            modifier = Modifier.size(22.dp)
+                        )
+                    }
                 }
             }
         }
 
-        // 3. Bottom Driver HUD Panel
+        // 3. Floating Map Controls (Right Side)
+        Column(
+            modifier = Modifier
+                .align(Alignment.CenterEnd)
+                .padding(end = 14.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            // My Location Button (Centers map on driver)
+            FloatingActionButton(
+                onClick = {
+                    if (driverLat != null && driverLng != null) {
+                        val js = "if (window.centerOnLocation) { window.centerOnLocation(${driverLat}, ${driverLng}); }"
+                        webViewRef?.evaluateJavascript(js, null)
+                    } else {
+                        Toast.makeText(context, "ยังไม่ได้รับพิกัด GPS ปัจจุบัน", Toast.LENGTH_SHORT).show()
+                    }
+                },
+                containerColor = Color(0xEE1E293B),
+                contentColor = Color(0xFF38BDF8),
+                shape = CircleShape,
+                modifier = Modifier.size(46.dp)
+            ) {
+                Icon(Icons.Default.Place, contentDescription = "ตำแหน่งฉัน", modifier = Modifier.size(22.dp))
+            }
+
+            // Layer Switcher Button (Toggles between Satellite, Road, Hybrid, OSM)
+            FloatingActionButton(
+                onClick = {
+                    currentProviderIndex = (currentProviderIndex + 1) % MapProviderRegistry.PROVIDERS.size
+                    val newProvider = MapProviderRegistry.PROVIDERS[currentProviderIndex]
+                    prefs.defaultMapLayer = newProvider.id
+                    val js = "if (window.switchMapLayer) { window.switchMapLayer('${newProvider.tileUrl}', '${newProvider.subdomains}', ${newProvider.maxZoom}); }"
+                    webViewRef?.evaluateJavascript(js, null)
+                    Toast.makeText(context, "เปลี่ยนแผนที่: ${newProvider.name}", Toast.LENGTH_SHORT).show()
+                },
+                containerColor = Color(0xEE1E293B),
+                contentColor = Color.White,
+                shape = CircleShape,
+                modifier = Modifier.size(46.dp)
+            ) {
+                Icon(Icons.Default.Settings, contentDescription = "เปลี่ยนชั้นแผนที่", modifier = Modifier.size(20.dp))
+            }
+
+            // Fit All Markers Button
+            FloatingActionButton(
+                onClick = {
+                    val js = "if (window.fitAllMarkers) { window.fitAllMarkers(); }"
+                    webViewRef?.evaluateJavascript(js, null)
+                },
+                containerColor = Color(0xEE1E293B),
+                contentColor = Color.White,
+                shape = CircleShape,
+                modifier = Modifier.size(46.dp)
+            ) {
+                Icon(Icons.Default.Search, contentDescription = "ดูภาพรวมทุกจุด", modifier = Modifier.size(20.dp))
+            }
+        }
+
+        // 4. Bottom Driver HUD Panel
         if (currentTarget != null) {
             Card(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 12.dp, vertical = 16.dp)
+                    .padding(horizontal = 12.dp, vertical = 14.dp)
                     .align(Alignment.BottomCenter),
                 shape = RoundedCornerShape(20.dp),
                 colors = CardDefaults.cardColors(containerColor = Color(0xFA0F172A)),
@@ -506,7 +698,7 @@ fun DeliveryHudView(
 
                     Spacer(modifier = Modifier.height(10.dp))
 
-                    // HUGE HOUSE NUMBER & RECIPIENT (No need to memorize)
+                    // HUGE HOUSE NUMBER & RECIPIENT
                     Text(
                         text = currentTarget.fullName ?: currentTarget.address ?: "บ้านเลขที่เป้าหมาย",
                         fontSize = 24.sp,
@@ -569,7 +761,7 @@ fun DeliveryHudView(
                         Spacer(modifier = Modifier.height(8.dp))
                     }
 
-                    // UPCOMING STOP PREVIEW (The user's dream feature: know next house in advance)
+                    // UPCOMING STOP PREVIEW (Shows next house so driver can pre-pick parcel)
                     if (nextTarget != null) {
                         Surface(
                             modifier = Modifier
@@ -609,7 +801,7 @@ fun DeliveryHudView(
 
                     Spacer(modifier = Modifier.height(12.dp))
 
-                    // ACTION BUTTONS (Giant Touch Targets for Riders)
+                    // ACTION BUTTONS (Giant touch targets for driving)
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -669,7 +861,7 @@ fun DeliveryHudView(
                 }
             }
         } else {
-            // When all stops delivered
+            // When all stops delivered or empty queue
             Card(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -690,14 +882,14 @@ fun DeliveryHudView(
                     )
                     Spacer(modifier = Modifier.height(12.dp))
                     Text(
-                        "ส่งพัสดุครบทุกจุดแล้ว!",
+                        "ยังไม่มีจุดส่งที่รอดำเนินการ",
                         fontWeight = FontWeight.Bold,
-                        fontSize = 20.sp,
+                        fontSize = 18.sp,
                         color = Color.White
                     )
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(
-                        "ยอดเยี่ยมมาก ปิดงานส่งของสำหรับรอบนี้เรียบร้อย",
+                        "เพิ่มจุดส่งจากแท็บ 'คลังบ้าน' หรือสแกนใบปะหน้าก่อนเริ่มนำทาง",
                         fontSize = 13.sp,
                         color = Color(0xFF94A3B8)
                     )
