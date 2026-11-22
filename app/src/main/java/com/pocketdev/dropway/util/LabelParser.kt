@@ -148,13 +148,15 @@ object LabelParser {
             ?: fallbackPostalMatches.lastOrNull()?.groupValues?.get(1)
             ?: ""
 
-        return LabelFields(
-            name = name,
-            phone = phone,
-            houseNo = houseNo,
-            address = rawAddress,
-            postalCode = postalCode,
-            tracking = tracking
+        return LabelValidator.cleanFields(
+            LabelFields(
+                name = name,
+                phone = phone,
+                houseNo = houseNo,
+                address = rawAddress,
+                postalCode = postalCode,
+                tracking = tracking
+            )
         )
     }
 

@@ -3,6 +3,7 @@ package com.pocketdev.dropway.data.remote
 import android.graphics.Bitmap
 import android.util.Base64
 import com.pocketdev.dropway.data.model.LabelFields
+import com.pocketdev.dropway.util.LabelValidator
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -116,13 +117,15 @@ object GeminiVisionClient {
                 val end = firstPart.lastIndexOf("}")
                 if (start in 0 until end) {
                     val cleanJson = JSONObject(firstPart.substring(start, end + 1))
-                    LabelFields(
-                        name = cleanJson.optString("name", "").trim(),
-                        phone = cleanJson.optString("phone", "").trim(),
-                        houseNo = cleanJson.optString("houseNo", "").trim(),
-                        address = cleanJson.optString("address", "").trim(),
-                        postalCode = cleanJson.optString("postalCode", "").trim(),
-                        tracking = cleanJson.optString("tracking", "").trim()
+                    LabelValidator.cleanFields(
+                        LabelFields(
+                            name = cleanJson.optString("name", "").trim(),
+                            phone = cleanJson.optString("phone", "").trim(),
+                            houseNo = cleanJson.optString("houseNo", "").trim(),
+                            address = cleanJson.optString("address", "").trim(),
+                            postalCode = cleanJson.optString("postalCode", "").trim(),
+                            tracking = cleanJson.optString("tracking", "").trim()
+                        )
                     )
                 } else {
                     throw RuntimeException("ไม่สามารถดึงข้อมูล JSON จากผลตอบกลับของ Gemini ได้")

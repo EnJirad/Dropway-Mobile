@@ -2,6 +2,7 @@ package com.pocketdev.dropway.data.remote
 
 import com.pocketdev.dropway.data.model.House
 import com.pocketdev.dropway.data.model.NavigationHouse
+import com.pocketdev.dropway.data.model.SameParcelMeta
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -12,6 +13,8 @@ import java.io.OutputStreamWriter
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.UUID
+
+class DuplicateParcelException(val sameStop: Boolean, message: String) : Exception(message)
 
 class NeonClient(private val getDatabaseUrl: () -> String) {
 
@@ -307,13 +310,46 @@ class NeonClient(private val getDatabaseUrl: () -> String) {
         }
     }
 
+    suspend fun checkExistingParcel(trackingNumber: String): Result<SameParcelMeta?> = runCatching {
+        withContext(Dispatchers.IO) {
+            val clean = trackingNumber.trim().replace(" ", "").uppercase()
+            if (clean.isBlank()) return@withContext null
+
+            val query = """
+                SELECT
+                  p.nav_id,
+                  p.tracking_number,
+                  p.created_at,
+                  unh.house_id,
+                  unh.delivery_status,
+                  COALESCE(h.full_name, unh.dest_name) AS full_name,
+                  COALESCE(h.address, unh.dest_address) AS address
+                FROM public.parcels p
+                JOIN public.user_navigation_houses unh ON unh.id = p.nav_id
+                LEFT JOIN public.houses h ON h.id = unh.house_id
+                WHERE upper(replace(p.tracking_number, ' ', '')) = $1
+                ORDER BY p.created_at DESC
+                LIMIT 1;
+            """.trimIndent()
+
+            val res = execute(query, listOf(clean))
+            val rows = res.optJSONArray("rows")
+            if (rows != null && rows.length() > 0) {
+                SameParcelMeta.fromJson(rows.getJSONObject(0))
+            } else {
+                null
+            }
+        }
+    }
+
     suspend fun addToNavigation(
         houseId: String?,
         trackingNumber: String? = null,
         destName: String? = null,
         destPhone: String? = null,
         destAddress: String? = null,
-        userId: String = "default-user"
+        userId: String = "default-user",
+        force: Boolean = false
     ): Result<String> = runCatching {
         withContext(Dispatchers.IO) {
             // Check existing navigation for house
@@ -333,9 +369,40 @@ class NeonClient(private val getDatabaseUrl: () -> String) {
                 }
             }
 
-            val navId: String
             val cleanTracking = trackingNumber?.trim()?.uppercase()?.takeIf { it.isNotBlank() }
 
+            // Check duplicate tracking number in today's queue
+            if (cleanTracking != null) {
+                val dupRes = execute(
+                    """
+                    SELECT nav_id FROM public.parcels
+                    WHERE upper(tracking_number) = $1
+                      AND (
+                        nav_id = $2
+                        OR (created_at AT TIME ZONE 'Asia/Bangkok')::date = (now() AT TIME ZONE 'Asia/Bangkok')::date
+                      );
+                    """.trimIndent(),
+                    listOf(cleanTracking, existingNavId)
+                )
+                val dupRows = dupRes.optJSONArray("rows")
+                if (dupRows != null && dupRows.length() > 0) {
+                    var inSameStop = false
+                    for (i in 0 until dupRows.length()) {
+                        val rowNavId = dupRows.getJSONObject(i).optString("nav_id")
+                        if (existingNavId != null && rowNavId == existingNavId) {
+                            inSameStop = true
+                            break
+                        }
+                    }
+                    if (inSameStop) {
+                        throw DuplicateParcelException(true, "บ้านนี้มีพัสดุเลขนี้ในคิวแล้ว")
+                    } else if (!force) {
+                        throw DuplicateParcelException(false, "เลขพัสดุนี้ถูกบันทึกวันนี้แล้ว ต้องการเพิ่มซ้ำหรือไม่?")
+                    }
+                }
+            }
+
+            val navId: String
             if (existingNavId != null) {
                 navId = existingNavId
             } else {

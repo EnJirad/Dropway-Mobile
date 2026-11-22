@@ -9,19 +9,16 @@ import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -31,12 +28,20 @@ import com.pocketdev.dropway.data.local.PreferencesManager
 import com.pocketdev.dropway.data.model.House
 import com.pocketdev.dropway.data.model.LabelFields
 import com.pocketdev.dropway.data.model.MatchResult
+import com.pocketdev.dropway.data.model.SameParcelMeta
+import com.pocketdev.dropway.data.remote.DuplicateParcelException
 import com.pocketdev.dropway.data.remote.GeminiVisionClient
 import com.pocketdev.dropway.data.remote.NeonClient
+import com.pocketdev.dropway.ui.components.BlockingLoader
+import com.pocketdev.dropway.ui.components.CameraViewfinder
+import com.pocketdev.dropway.ui.components.ConfirmActionDialog
+import com.pocketdev.dropway.ui.components.ScanResultSheet
 import com.pocketdev.dropway.ui.theme.*
-import com.pocketdev.dropway.util.DriverActions
+import com.pocketdev.dropway.util.ImageEnhancer
 import com.pocketdev.dropway.util.LabelParser
+import com.pocketdev.dropway.util.LabelValidator
 import com.pocketdev.dropway.util.SearchMatcher
+import com.pocketdev.dropway.util.SoundFeedback
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -48,31 +53,42 @@ fun ScanScreen(
     neonClient: NeonClient,
     prefs: PreferencesManager,
     onNavigateToQueue: () -> Unit,
-    onNavigateToSettings: () -> Unit
+    onNavigateToSettings: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
     var houses by remember { mutableStateOf<List<House>>(emptyList()) }
-    var inputText by remember { mutableStateOf("") }
-    var isProcessing by remember { mutableStateOf(false) }
-    var capturedBitmap by remember { mutableStateOf<Bitmap?>(null) }
+    var scanning by remember { mutableStateOf(false) }
 
-    // Parsed draft fields
-    var draftFields by remember { mutableStateOf(LabelFields()) }
-    var isEditingDraft by remember { mutableStateOf(false) }
-    var driverNote by remember { mutableStateOf("") }
+    // Multi-stage loader states
+    var loading by remember { mutableStateOf(false) }
+    var loadingTitle by remember { mutableStateOf("กำลังอ่านฉลาก") }
+    var loadingStage by remember { mutableStateOf<String?>(null) }
+    var lastElapsedMs by remember { mutableStateOf<Long?>(null) }
 
-    // Match Results
+    // Scan result states
+    var sheetOpen by remember { mutableStateOf(false) }
+    var matchedHouse by remember { mutableStateOf<House?>(null) }
     var primaryMatch by remember { mutableStateOf<MatchResult?>(null) }
     var candidates by remember { mutableStateOf<List<MatchResult>>(emptyList()) }
-    var hasScanned by remember { mutableStateOf(false) }
+    var draftFields by remember { mutableStateOf(LabelFields()) }
+    var trackingNumber by remember { mutableStateOf<String?>(null) }
+    var sameParcel by remember { mutableStateOf<SameParcelMeta?>(null) }
+    var noticeMessage by remember { mutableStateOf<String?>(null) }
+    var isAddingToNav by remember { mutableStateOf(false) }
+    var addedSuccess by remember { mutableStateOf(false) }
+    var lastScannedCode by remember { mutableStateOf("") }
 
-    // In-sheet search
-    var manualSearchQuery by remember { mutableStateOf("") }
-    var manualSearchResults by remember { mutableStateOf<List<House>>(emptyList()) }
+    // Manual input & Duplicate confirm dialog states
+    var manualCodeInput by remember { mutableStateOf("") }
+    var pendingDuplicateForm by remember { mutableStateOf<LabelFields?>(null) }
+    var showDuplicateConfirmDialog by remember { mutableStateOf(false) }
 
-    // Load houses from database on mount
+    // Cooldown timestamp to prevent immediate duplicate re-scanning
+    var cooldownUntil by remember { mutableStateOf(0L) }
+
+    // Load houses from Neon on mount
     LaunchedEffect(Unit) {
         if (prefs.isConfigured()) {
             val res = neonClient.getHouses(null)
@@ -80,60 +96,209 @@ fun ScanScreen(
         }
     }
 
-    // Logic to analyze text and match against houses
-    fun processScan(text: String, fields: LabelFields? = null) {
-        val parsed = fields ?: LabelParser.parseLabel(text)
-        draftFields = parsed
-        hasScanned = true
+    // Process scan from image or text
+    fun processScan(bitmap: Bitmap?, rawText: String?, isAuto: Boolean = false) {
+        if (loading || System.currentTimeMillis() < cooldownUntil) return
 
-        val searchSource = if (text.isNotBlank()) {
-            text
-        } else {
-            listOf(parsed.name, parsed.houseNo, parsed.address, parsed.phone, parsed.tracking)
-                .filter { it.isNotBlank() }
-                .joinToString(" ")
-        }
+        val startedAt = System.currentTimeMillis()
+        loading = true
+        loadingTitle = "กำลังอ่านฉลาก"
+        loadingStage = "กำลังเตรียมรูป…"
+        sheetOpen = false
+        matchedHouse = null
+        primaryMatch = null
+        candidates = emptyList()
+        sameParcel = null
+        noticeMessage = null
+        addedSuccess = false
+        lastScannedCode = ""
 
-        val allMatches = SearchMatcher.matchHouses(houses, searchSource)
-        if (allMatches.isNotEmpty()) {
-            primaryMatch = allMatches.first()
-            candidates = allMatches.drop(1)
-        } else {
-            primaryMatch = null
-            candidates = emptyList()
-        }
-    }
+        scope.launch {
+            try {
+                var fields = LabelFields()
 
-    // Camera launcher
-    val cameraLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.TakePicturePreview()
-    ) { bitmap ->
-        if (bitmap != null) {
-            capturedBitmap = bitmap
-            if (prefs.geminiApiKey.isNotBlank()) {
-                isProcessing = true
-                scope.launch {
+                // 1. Read label with AI or OCR
+                if (bitmap != null && prefs.geminiApiKey.isNotBlank()) {
+                    loadingStage = "กำลังอ่านฉลากด้วย AI และ OCR พร้อมกัน…"
                     val geminiRes = GeminiVisionClient.readLabelWithGemini(prefs.geminiApiKey, bitmap)
-                    isProcessing = false
-                    geminiRes.onSuccess { fields ->
-                        Toast.makeText(context, "AI อ่านข้อมูลใบปะหน้าสำเร็จ!", Toast.LENGTH_SHORT).show()
-                        processScan("", fields)
+                    geminiRes.onSuccess { parsed ->
+                        fields = LabelValidator.cleanFields(parsed)
                     }.onFailure { err ->
-                        Toast.makeText(context, "AI อ่านไม่สำเร็จ: ${err.message}", Toast.LENGTH_LONG).show()
+                        noticeMessage = "AI อ่านไม่สมบูรณ์ (${err.message}) กรุณาตรวจข้อมูล"
+                    }
+                } else if (!rawText.isNullOrBlank()) {
+                    loadingStage = "กำลังประมวลผลข้อความฉลาก…"
+                    val parsed = LabelParser.parseLabel(rawText)
+                    fields = LabelValidator.cleanFields(parsed)
+                } else if (bitmap != null) {
+                    noticeMessage = "ตั้งค่า Gemini API Key ในหน้าตั้งค่าเพื่อให้ระบบอ่านรูปอัตโนมัติ"
+                }
+
+                draftFields = fields
+                val effectiveTracking = fields.tracking.takeIf { it.isNotBlank() }
+                    ?: LabelParser.extractTracking(rawText ?: "")
+                trackingNumber = effectiveTracking
+
+                // 2. Check duplicate parcel in queue
+                if (effectiveTracking != null) {
+                    val dupRes = neonClient.checkExistingParcel(effectiveTracking)
+                    dupRes.onSuccess { sp ->
+                        sameParcel = sp
                     }
                 }
-            } else {
-                Toast.makeText(
-                    context,
-                    "ถ่ายรูปแล้ว! ตั้งค่า Gemini API Key ในหน้าตั้งค่าเพื่อให้ระบบอ่านใบปะหน้าอัตโนมัติ",
-                    Toast.LENGTH_LONG
-                ).show()
+
+                // 3. Search and Match with houses database
+                loadingStage = "กำลังเทียบกับคลังบ้าน…"
+                val searchText = when {
+                    !rawText.isNullOrBlank() -> rawText
+                    fields.hasAnyField() -> listOf(fields.name, fields.houseNo, fields.address, fields.phone, fields.tracking)
+                        .filter { it.isNotBlank() }.joinToString(" ")
+                    else -> ""
+                }
+
+                lastScannedCode = searchText.take(200)
+
+                if (searchText.isNotBlank()) {
+                    val allMatches = withContext(Dispatchers.Default) {
+                        SearchMatcher.matchHouses(houses, searchText)
+                    }
+                    if (allMatches.isNotEmpty()) {
+                        val top = allMatches.first()
+                        if (top.level == "exact" || top.level == "high") {
+                            matchedHouse = top.house
+                            primaryMatch = top
+                            candidates = allMatches.drop(1)
+                            SoundFeedback.playSuccessSound(context)
+                        } else {
+                            matchedHouse = null
+                            primaryMatch = top
+                            candidates = allMatches
+                        }
+                    } else {
+                        matchedHouse = null
+                        primaryMatch = null
+                        candidates = emptyList()
+                    }
+                }
+
+                lastElapsedMs = System.currentTimeMillis() - startedAt
+                loading = false
+                sheetOpen = true
+
+                if (matchedHouse != null) {
+                    Toast.makeText(context, "พบบ้านแล้ว", Toast.LENGTH_SHORT).show()
+                } else if (fields.hasAnyField()) {
+                    Toast.makeText(context, "อ่านข้อมูลฉลากสำเร็จ", Toast.LENGTH_SHORT).show()
+                } else {
+                    Toast.makeText(context, "ไม่พบบ้านที่ตรงกับฉลากนี้", Toast.LENGTH_SHORT).show()
+                }
+            } catch (e: Exception) {
+                loading = false
+                sheetOpen = true
+                noticeMessage = "อ่านฉลากไม่สำเร็จ: ${e.message}"
+                Toast.makeText(context, "อ่านฉลากไม่สำเร็จ", Toast.LENGTH_SHORT).show()
             }
         }
     }
 
-    // Gallery launcher
-    val galleryLauncher = rememberLauncherForActivityResult(
+    // Add to Navigation queue with Duplicate check
+    fun handleAddToNavigation(form: LabelFields, force: Boolean = false) {
+        if (isAddingToNav) return
+        isAddingToNav = true
+
+        scope.launch {
+            val tracking = form.tracking.trim().takeIf { it.isNotBlank() }
+            val fullAddr = LabelParser.composeAddress(form.houseNo, form.address, form.postalCode)
+
+            val addRes = neonClient.addToNavigation(
+                houseId = matchedHouse?.id,
+                trackingNumber = tracking,
+                destName = form.name.trim().takeIf { it.isNotBlank() } ?: matchedHouse?.fullName,
+                destPhone = form.phone.trim().takeIf { it.isNotBlank() } ?: matchedHouse?.phone,
+                destAddress = fullAddr.takeIf { it.isNotBlank() } ?: matchedHouse?.address,
+                userId = prefs.userId,
+                force = force
+            )
+
+            isAddingToNav = false
+
+            addRes.onSuccess {
+                addedSuccess = true
+                SoundFeedback.playSuccessSound(context)
+                Toast.makeText(context, "เพิ่มเข้าคิวนำทางวันนี้เรียบร้อยแล้ว", Toast.LENGTH_SHORT).show()
+
+                // Immediately close sheet and resume camera with cooldown
+                sheetOpen = false
+                cooldownUntil = System.currentTimeMillis() + 1800 // AUTO_COOLDOWN_MS
+            }.onFailure { err ->
+                if (err is DuplicateParcelException) {
+                    SoundFeedback.playWarningSound(context)
+                    if (err.sameStop) {
+                        Toast.makeText(context, "บ้านนี้มีพัสดุเลขนี้ในคิวแล้ว", Toast.LENGTH_LONG).show()
+                    } else {
+                        // Prompt duplicate confirm dialog
+                        pendingDuplicateForm = form
+                        showDuplicateConfirmDialog = true
+                    }
+                } else {
+                    Toast.makeText(context, "เพิ่มไม่สำเร็จ: ${err.message}", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+    }
+
+    // Save or update house in Neon
+    fun handleSaveHouse(form: LabelFields, noteText: String) {
+        if (isAddingToNav) return
+        isAddingToNav = true
+
+        scope.launch {
+            val fullAddr = LabelParser.composeAddress(form.houseNo, form.address, form.postalCode)
+            val houseToSave = House(
+                id = matchedHouse?.id ?: UUID.randomUUID().toString(),
+                fullName = form.name.trim().takeIf { it.isNotBlank() } ?: matchedHouse?.fullName,
+                phone = form.phone.trim().takeIf { it.isNotBlank() } ?: matchedHouse?.phone,
+                address = fullAddr.takeIf { it.isNotBlank() } ?: matchedHouse?.address,
+                lat = matchedHouse?.lat ?: 0.0,
+                lng = matchedHouse?.lng ?: 0.0,
+                note = noteText.trim().takeIf { it.isNotBlank() } ?: matchedHouse?.note,
+                quantity = matchedHouse?.quantity ?: 1
+            )
+
+            val res = if (matchedHouse != null) {
+                neonClient.updateHouse(houseToSave)
+            } else {
+                neonClient.createHouse(houseToSave)
+            }
+
+            isAddingToNav = false
+
+            res.onSuccess {
+                matchedHouse = houseToSave
+                primaryMatch = null
+                SoundFeedback.playSuccessSound(context)
+                Toast.makeText(context, if (matchedHouse != null) "บันทึกการแก้ไขแล้ว" else "บันทึกเป็นบ้านใหม่แล้ว", Toast.LENGTH_SHORT).show()
+                // Refresh houses cache
+                val refresh = neonClient.getHouses(null)
+                refresh.onSuccess { houses = it }
+            }.onFailure {
+                Toast.makeText(context, "บันทึกไม่สำเร็จ: ${it.message}", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    // Fallback camera launcher
+    val photoCaptureLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.TakePicturePreview()
+    ) { bitmap ->
+        if (bitmap != null) {
+            SoundFeedback.playCaptureSound(context)
+            processScan(ImageEnhancer.sharpenBitmap(bitmap), null)
+        }
+    }
+
+    // Gallery picker launcher
+    val galleryPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
     ) { uri: Uri? ->
         if (uri != null) {
@@ -144,46 +309,11 @@ fun ScanScreen(
                     @Suppress("DEPRECATION")
                     MediaStore.Images.Media.getBitmap(context.contentResolver, uri)
                 }
-                capturedBitmap = bitmap
-                if (prefs.geminiApiKey.isNotBlank()) {
-                    isProcessing = true
-                    scope.launch {
-                        val geminiRes = GeminiVisionClient.readLabelWithGemini(prefs.geminiApiKey, bitmap)
-                        isProcessing = false
-                        geminiRes.onSuccess { fields ->
-                            Toast.makeText(context, "AI อ่านข้อมูลใบปะหน้าสำเร็จ!", Toast.LENGTH_SHORT).show()
-                            processScan("", fields)
-                        }.onFailure { err ->
-                            Toast.makeText(context, "AI อ่านไม่สำเร็จ: ${err.message}", Toast.LENGTH_LONG).show()
-                        }
-                    }
-                } else {
-                    Toast.makeText(
-                        context,
-                        "เลือกรูปแล้ว! ตั้งค่า Gemini API Key ในหน้าตั้งค่าเพื่อให้ AI อ่านใบปะหน้า",
-                        Toast.LENGTH_LONG
-                    ).show()
-                }
+                SoundFeedback.playCaptureSound(context)
+                processScan(ImageEnhancer.sharpenBitmap(bitmap), null)
             } catch (e: Exception) {
                 Toast.makeText(context, "เปิดรูปภาพไม่สำเร็จ: ${e.message}", Toast.LENGTH_SHORT).show()
             }
-        }
-    }
-
-    // Manual search debounce
-    LaunchedEffect(manualSearchQuery) {
-        val q = manualSearchQuery.trim()
-        if (q.length >= 2) {
-            withContext(Dispatchers.Default) {
-                val results = houses.filter { house ->
-                    SearchMatcher.matchHouseWithSearch(house, q) > 0
-                }.take(6)
-                withContext(Dispatchers.Main) {
-                    manualSearchResults = results
-                }
-            }
-        } else {
-            manualSearchResults = emptyList()
         }
     }
 
@@ -192,599 +322,229 @@ fun ScanScreen(
             TopAppBar(
                 title = {
                     Column {
-                        Text("สแกนใบปะหน้าพัสดุ", fontWeight = FontWeight.Bold, fontSize = 18.sp)
-                        Text("ตรวจจับบ้านเลขที่, ผู้รับ, เบอร์โทร และเทียบกับคลังบ้าน", fontSize = 11.sp, color = TextMuted)
+                        Text("สแกนใบปะหน้า", fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                        Text("เปิดกล้องแล้วจ่อใบปะหน้าให้อยู่กลางกรอบ ระบบจะถ่ายและอ่านให้เอง", fontSize = 11.sp, color = TextMuted)
                     }
                 }
             )
         }
     ) { padding ->
-        LazyColumn(
+        Column(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
-                .background(NeutralBackground),
-            contentPadding = PaddingValues(12.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
+                .background(NeutralBackground)
+                .verticalScroll(rememberScrollState())
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            // Scanner input methods card
-            item {
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(12.dp),
-                    colors = CardDefaults.cardColors(containerColor = SurfaceCard),
-                    elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
-                ) {
-                    Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Default.Search, contentDescription = null, tint = TealPrimary, modifier = Modifier.size(20.dp))
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("ถ่ายรูปหรือป้อนข้อความใบปะหน้า", fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                        }
+            // 1. Live Camera Viewfinder Card
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = SurfaceCard),
+                elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+            ) {
+                Column(modifier = Modifier.padding(12.dp)) {
+                    CameraViewfinder(
+                        scanning = scanning,
+                        onStartScanning = { scanning = true },
+                        onStopScanning = { scanning = false },
+                        onCapture = { capturedBitmap ->
+                            SoundFeedback.playCaptureSound(context)
+                            processScan(capturedBitmap, null, isAuto = true)
+                        },
+                        isProcessing = loading
+                    )
 
-                        // Photo buttons row
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    // Camera Controls Row
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        if (scanning) {
+                            OutlinedButton(
+                                onClick = { scanning = false },
+                                modifier = Modifier.weight(1f),
+                                shape = RoundedCornerShape(8.dp)
+                            ) {
+                                Icon(Icons.Default.Close, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("หยุดกล้อง")
+                            }
+                        } else {
                             Button(
-                                onClick = { cameraLauncher.launch(null) },
+                                onClick = { scanning = true },
                                 modifier = Modifier.weight(1f),
                                 colors = ButtonDefaults.buttonColors(containerColor = TealPrimary),
                                 shape = RoundedCornerShape(8.dp)
                             ) {
-                                Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Text("ถ่ายรูปใบปะหน้า", fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                            }
-
-                            OutlinedButton(
-                                onClick = { galleryLauncher.launch("image/*") },
-                                modifier = Modifier.weight(1f),
-                                shape = RoundedCornerShape(8.dp)
-                            ) {
-                                Icon(Icons.Default.DateRange, contentDescription = null, modifier = Modifier.size(16.dp), tint = TextSecondary)
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Text("เลือกจากคลังภาพ", fontSize = 12.sp, color = TextSecondary)
+                                Icon(Icons.Default.Search, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("เปิดกล้องสแกน")
                             }
                         }
 
-                        // Text input for OCR text / Barcode text
+                        OutlinedButton(
+                            onClick = { photoCaptureLauncher.launch(null) },
+                            modifier = Modifier.weight(1f),
+                            shape = RoundedCornerShape(8.dp)
+                        ) {
+                            Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("ถ่ายรูปเอง (สำรอง)", fontSize = 12.sp)
+                        }
+                    }
+
+                    // Gallery fallback button
+                    OutlinedButton(
+                        onClick = { galleryPickerLauncher.launch("image/*") },
+                        modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        Icon(Icons.Default.DateRange, contentDescription = null, modifier = Modifier.size(16.dp), tint = TextSecondary)
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("เลือกรูปจากคลังภาพ", fontSize = 12.sp, color = TextSecondary)
+                    }
+
+                    // Elapsed Time Status
+                    lastElapsedMs?.let { ms ->
+                        Text(
+                            text = "รอบล่าสุดใช้เวลา ${String.format("%.1f", ms / 1000.0)} วินาที (ตั้งแต่ถ่ายภาพจนได้ผล)",
+                            fontSize = 11.sp,
+                            color = TextMuted,
+                            modifier = Modifier.padding(top = 8.dp)
+                        )
+                    }
+
+                    if (lastScannedCode.isNotBlank()) {
+                        Text(
+                            text = "รหัสที่อ่านได้: $lastScannedCode",
+                            fontSize = 11.sp,
+                            color = TextMuted,
+                            maxLines = 2,
+                            modifier = Modifier.padding(top = 2.dp)
+                        )
+                    }
+                }
+            }
+
+            // 2. Manual Code / Text Input Section (กรอกรหัสเอง)
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = SurfaceCard),
+                elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
+            ) {
+                Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text("กรอกรหัสเอง", fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                    Text(
+                        "ใช้เมื่อกล้องใช้ไม่ได้ — วาง UUID ของบ้าน หรือข้อความฉลาก / ชื่อ / เบอร์ / ที่อยู่",
+                        fontSize = 11.sp,
+                        color = TextMuted
+                    )
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
                         OutlinedTextField(
-                            value = inputText,
-                            onValueChange = {
-                                inputText = it
-                                if (it.isNotBlank()) {
-                                    draftFields = LabelParser.parseLabel(it)
-                                }
-                            },
-                            placeholder = {
-                                Text(
-                                    "หรือวางข้อความใบปะหน้า / เลขพัสดุ เช่น:\nTH012345678 นายมานะ 0891234567 บ้านเลขที่ 1442/3 ม.2 ต.แม่ตาว...",
-                                    fontSize = 12.sp,
-                                    color = TextMuted
-                                )
-                            },
-                            modifier = Modifier.fillMaxWidth(),
-                            maxLines = 4,
-                            singleLine = false,
+                            value = manualCodeInput,
+                            onValueChange = { manualCodeInput = it },
+                            placeholder = { Text("UUID หรือข้อความใบปะหน้า...", fontSize = 12.sp) },
+                            modifier = Modifier.weight(1f),
+                            singleLine = true,
                             shape = RoundedCornerShape(8.dp)
                         )
 
-                        // Action button
                         Button(
                             onClick = {
-                                if (inputText.isNotBlank()) {
-                                    processScan(inputText)
-                                } else if (capturedBitmap != null && prefs.geminiApiKey.isNotBlank()) {
-                                    isProcessing = true
-                                    scope.launch {
-                                        val res = GeminiVisionClient.readLabelWithGemini(prefs.geminiApiKey, capturedBitmap!!)
-                                        isProcessing = false
-                                        res.onSuccess { fields ->
-                                            processScan("", fields)
-                                        }.onFailure {
-                                            Toast.makeText(context, "AI อ่านไม่สำเร็จ: ${it.message}", Toast.LENGTH_SHORT).show()
-                                        }
-                                    }
+                                if (manualCodeInput.isNotBlank()) {
+                                    processScan(null, manualCodeInput)
                                 } else {
-                                    Toast.makeText(context, "กรุณาถ่ายรูปหรือวางข้อความใบปะหน้า", Toast.LENGTH_SHORT).show()
+                                    Toast.makeText(context, "กรุณากรอกข้อความก่อนค้นหา", Toast.LENGTH_SHORT).show()
                                 }
                             },
-                            modifier = Modifier.fillMaxWidth(),
-                            enabled = !isProcessing,
                             colors = ButtonDefaults.buttonColors(containerColor = TealPrimary),
                             shape = RoundedCornerShape(8.dp)
                         ) {
-                            if (isProcessing) {
-                                CircularProgressIndicator(color = Color.White, modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Text("กำลังวิเคราะห์ด้วย OCR/AI...", fontSize = 13.sp)
-                            } else {
-                                Icon(Icons.Default.Search, contentDescription = null, modifier = Modifier.size(16.dp))
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text("วิเคราะห์ใบปะหน้าและเทียบกับคลังบ้าน", fontWeight = FontWeight.Bold, fontSize = 13.sp)
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Results Section (ScanResultSheet equivalent)
-            if (hasScanned || draftFields.hasAnyField() || primaryMatch != null) {
-                item {
-                    val activeHouse = primaryMatch?.house
-                    val displayAddress = remember(draftFields, activeHouse) {
-                        if (activeHouse != null) {
-                            activeHouse.address ?: ""
-                        } else {
-                            LabelParser.composeAddress(draftFields.houseNo, draftFields.address, draftFields.postalCode)
-                        }
-                    }
-                    val displayName = remember(draftFields, activeHouse) {
-                        activeHouse?.fullName ?: draftFields.name
-                    }
-                    val displayPhone = remember(draftFields, activeHouse) {
-                        activeHouse?.phone ?: draftFields.phone
-                    }
-                    val displayTracking = remember(draftFields, primaryMatch) {
-                        draftFields.tracking.takeIf { it.isNotBlank() } ?: primaryMatch?.trackingCandidate ?: ""
-                    }
-
-                    Card(
-                        modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(12.dp),
-                        colors = CardDefaults.cardColors(containerColor = SurfaceCard),
-                        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
-                    ) {
-                        Column(modifier = Modifier.padding(14.dp)) {
-                            // Primary Header: Hit or Miss Badge + Match Level
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    if (activeHouse != null) {
-                                        Surface(
-                                            color = TealContainer,
-                                            shape = RoundedCornerShape(6.dp)
-                                        ) {
-                                            Row(
-                                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-                                                verticalAlignment = Alignment.CenterVertically
-                                            ) {
-                                                Icon(Icons.Default.CheckCircle, contentDescription = null, tint = TealDark, modifier = Modifier.size(14.dp))
-                                                Spacer(modifier = Modifier.width(4.dp))
-                                                Text("ตรงกับฐานข้อมูล", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = TealDark)
-                                            }
-                                        }
-                                    } else {
-                                        Surface(
-                                            color = Color(0xFFFEF3C7),
-                                            shape = RoundedCornerShape(6.dp)
-                                        ) {
-                                            Row(
-                                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-                                                verticalAlignment = Alignment.CenterVertically
-                                            ) {
-                                                Icon(Icons.Default.Info, contentDescription = null, tint = Color(0xFFB45309), modifier = Modifier.size(14.dp))
-                                                Spacer(modifier = Modifier.width(4.dp))
-                                                Text("ข้อมูลจากฉลาก (บ้านใหม่)", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color(0xFFB45309))
-                                            }
-                                        }
-                                    }
-
-                                    // Match Level Badge
-                                    primaryMatch?.let { m ->
-                                        Spacer(modifier = Modifier.width(6.dp))
-                                        val levelText = when (m.level) {
-                                            "exact" -> "ตรงมาก"
-                                            "high" -> "ใกล้เคียงสูง"
-                                            else -> "อาจใช่"
-                                        }
-                                        val levelColor = when (m.level) {
-                                            "exact" -> StatusDelivered
-                                            "high" -> TealPrimary
-                                            else -> StatusPending
-                                        }
-                                        Surface(
-                                            color = levelColor.copy(alpha = 0.15f),
-                                            shape = RoundedCornerShape(6.dp)
-                                        ) {
-                                            Text(
-                                                text = levelText,
-                                                fontSize = 11.sp,
-                                                fontWeight = FontWeight.Bold,
-                                                color = levelColor,
-                                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp)
-                                            )
-                                        }
-                                    }
-                                }
-
-                                // Edit button toggle
-                                TextButton(
-                                    onClick = { isEditingDraft = !isEditingDraft },
-                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
-                                ) {
-                                    Icon(Icons.Default.Edit, contentDescription = null, modifier = Modifier.size(14.dp))
-                                    Spacer(modifier = Modifier.width(4.dp))
-                                    Text(if (isEditingDraft) "ดูสรุป" else "แก้ไขข้อมูล", fontSize = 12.sp)
-                                }
-                            }
-
-                            // Match reasons pill
-                            primaryMatch?.reasons?.let { reasons ->
-                                if (reasons.isNotEmpty()) {
-                                    Spacer(modifier = Modifier.height(4.dp))
-                                    Text(
-                                        text = reasons.joinToString(" • "),
-                                        fontSize = 11.sp,
-                                        color = TextSecondary
-                                    )
-                                }
-                            }
-
-                            // Conflicts alert
-                            primaryMatch?.conflicts?.let { conflicts ->
-                                if (conflicts.isNotEmpty()) {
-                                    Spacer(modifier = Modifier.height(6.dp))
-                                    Surface(
-                                        color = Color(0xFFFEE2E2),
-                                        shape = RoundedCornerShape(6.dp),
-                                        modifier = Modifier.fillMaxWidth()
-                                    ) {
-                                        Text(
-                                            text = "⚠️ " + conflicts.joinToString(" • "),
-                                            fontSize = 11.sp,
-                                            color = Color(0xFF991B1B),
-                                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
-                                        )
-                                    }
-                                }
-                            }
-
-                            Spacer(modifier = Modifier.height(10.dp))
-
-                            // Editable form or Display View
-                            if (isEditingDraft) {
-                                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    OutlinedTextField(
-                                        value = draftFields.name,
-                                        onValueChange = { draftFields = draftFields.copy(name = it) },
-                                        label = { Text("ชื่อผู้รับ", fontSize = 12.sp) },
-                                        modifier = Modifier.fillMaxWidth(),
-                                        singleLine = true
-                                    )
-                                    OutlinedTextField(
-                                        value = draftFields.phone,
-                                        onValueChange = { draftFields = draftFields.copy(phone = it) },
-                                        label = { Text("เบอร์โทร", fontSize = 12.sp) },
-                                        modifier = Modifier.fillMaxWidth(),
-                                        singleLine = true
-                                    )
-                                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                        OutlinedTextField(
-                                            value = draftFields.houseNo,
-                                            onValueChange = { draftFields = draftFields.copy(houseNo = it) },
-                                            label = { Text("บ้านเลขที่", fontSize = 12.sp) },
-                                            modifier = Modifier.weight(1f),
-                                            singleLine = true
-                                        )
-                                        OutlinedTextField(
-                                            value = draftFields.postalCode,
-                                            onValueChange = { draftFields = draftFields.copy(postalCode = it) },
-                                            label = { Text("รหัสไปรษณีย์", fontSize = 12.sp) },
-                                            modifier = Modifier.weight(1f),
-                                            singleLine = true
-                                        )
-                                    }
-                                    OutlinedTextField(
-                                        value = draftFields.address,
-                                        onValueChange = { draftFields = draftFields.copy(address = it) },
-                                        label = { Text("ที่อยู่", fontSize = 12.sp) },
-                                        modifier = Modifier.fillMaxWidth(),
-                                        maxLines = 3
-                                    )
-                                    OutlinedTextField(
-                                        value = draftFields.tracking,
-                                        onValueChange = { draftFields = draftFields.copy(tracking = it) },
-                                        label = { Text("เลขพัสดุ", fontSize = 12.sp) },
-                                        modifier = Modifier.fillMaxWidth(),
-                                        singleLine = true
-                                    )
-                                    OutlinedTextField(
-                                        value = driverNote,
-                                        onValueChange = { driverNote = it },
-                                        label = { Text("หมายเหตุผู้ส่ง / จุดสังเกต", fontSize = 12.sp) },
-                                        modifier = Modifier.fillMaxWidth(),
-                                        maxLines = 2
-                                    )
-                                }
-                            } else {
-                                // Clean display card
-                                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                                    // Recipient Name
-                                    Text(
-                                        text = displayName.takeIf { it.isNotBlank() } ?: "ไม่ทราบชื่อผู้รับ",
-                                        fontWeight = FontWeight.Bold,
-                                        fontSize = 17.sp,
-                                        color = TextPrimary
-                                    )
-
-                                    // Phone
-                                    if (displayPhone.isNotBlank()) {
-                                        Row(
-                                            modifier = Modifier.clickable { DriverActions.openPhoneDialer(context, displayPhone) },
-                                            verticalAlignment = Alignment.CenterVertically
-                                        ) {
-                                            Icon(Icons.Default.Phone, contentDescription = null, tint = StatusDelivered, modifier = Modifier.size(15.dp))
-                                            Spacer(modifier = Modifier.width(6.dp))
-                                            Text(displayPhone, fontSize = 14.sp, color = StatusDelivered, fontWeight = FontWeight.SemiBold)
-                                        }
-                                    }
-
-                                    // Address
-                                    if (displayAddress.isNotBlank()) {
-                                        Row(verticalAlignment = Alignment.Top) {
-                                            Icon(Icons.Default.LocationOn, contentDescription = null, tint = TealPrimary, modifier = Modifier.size(15.dp).padding(top = 2.dp))
-                                            Spacer(modifier = Modifier.width(6.dp))
-                                            Text(displayAddress, fontSize = 13.sp, color = TextSecondary, lineHeight = 18.sp)
-                                        }
-                                    }
-
-                                    // Tracking number
-                                    if (displayTracking.isNotBlank()) {
-                                        Row(verticalAlignment = Alignment.CenterVertically) {
-                                            Icon(Icons.Default.ArrowForward, contentDescription = null, tint = TextMuted, modifier = Modifier.size(14.dp))
-                                            Spacer(modifier = Modifier.width(6.dp))
-                                            Text("เลขพัสดุ: $displayTracking", fontSize = 12.sp, color = TextMuted, fontWeight = FontWeight.Medium)
-                                        }
-                                    }
-
-                                    // House note if present
-                                    val noteText = activeHouse?.note?.takeIf { it.isNotBlank() } ?: driverNote.takeIf { it.isNotBlank() }
-                                    if (noteText != null) {
-                                        Surface(
-                                            color = Color(0xFFFEF3C7),
-                                            shape = RoundedCornerShape(8.dp),
-                                            modifier = Modifier.fillMaxWidth().padding(top = 4.dp)
-                                        ) {
-                                            Row(
-                                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
-                                                verticalAlignment = Alignment.Top
-                                            ) {
-                                                Text("📝", fontSize = 12.sp)
-                                                Spacer(modifier = Modifier.width(6.dp))
-                                                Text(noteText, fontSize = 11.sp, color = Color(0xFF78350F))
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-
-                            Spacer(modifier = Modifier.height(14.dp))
-
-                            // Dropway 3-action buttons (บันทึก / แก้ไข / เพิ่มเข้านำทาง)
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                // 1. บันทึกเป็นบ้านใหม่ / อัปเดตบ้าน
-                                OutlinedButton(
-                                    onClick = {
-                                        scope.launch {
-                                            val fullAddr = LabelParser.composeAddress(draftFields.houseNo, draftFields.address, draftFields.postalCode)
-                                            val houseToSave = House(
-                                                id = activeHouse?.id ?: UUID.randomUUID().toString(),
-                                                fullName = draftFields.name.takeIf { it.isNotBlank() } ?: activeHouse?.fullName,
-                                                phone = draftFields.phone.takeIf { it.isNotBlank() } ?: activeHouse?.phone,
-                                                address = fullAddr.takeIf { it.isNotBlank() } ?: activeHouse?.address,
-                                                lat = activeHouse?.lat ?: 0.0,
-                                                lng = activeHouse?.lng ?: 0.0,
-                                                note = driverNote.takeIf { it.isNotBlank() } ?: activeHouse?.note,
-                                                quantity = activeHouse?.quantity ?: 1
-                                            )
-                                            val saveRes = if (activeHouse != null) {
-                                                neonClient.updateHouse(houseToSave)
-                                            } else {
-                                                neonClient.createHouse(houseToSave)
-                                            }
-                                            saveRes.onSuccess {
-                                                Toast.makeText(context, "บันทึกข้อมูลบ้านลงคลังสำเร็จ!", Toast.LENGTH_SHORT).show()
-                                                val refreshRes = neonClient.getHouses(null)
-                                                refreshRes.onSuccess { houses = it }
-                                            }.onFailure {
-                                                Toast.makeText(context, "บันทึกไม่สำเร็จ: ${it.message}", Toast.LENGTH_SHORT).show()
-                                            }
-                                        }
-                                    },
-                                    modifier = Modifier.weight(1f),
-                                    shape = RoundedCornerShape(8.dp)
-                                ) {
-                                    Icon(Icons.Default.Done, contentDescription = null, modifier = Modifier.size(14.dp))
-                                    Spacer(modifier = Modifier.width(4.dp))
-                                    Text(if (activeHouse != null) "อัปเดตบ้าน" else "บันทึกบ้านใหม่", fontSize = 12.sp)
-                                }
-
-                                // 2. เพิ่มเข้าคิวนำทาง
-                                Button(
-                                    onClick = {
-                                        scope.launch {
-                                            val tracking = displayTracking.takeIf { it.isNotBlank() }
-                                            val res = neonClient.addToNavigation(
-                                                houseId = activeHouse?.id,
-                                                trackingNumber = tracking,
-                                                destName = displayName.takeIf { it.isNotBlank() },
-                                                destPhone = displayPhone.takeIf { it.isNotBlank() },
-                                                destAddress = displayAddress.takeIf { it.isNotBlank() },
-                                                userId = prefs.userId
-                                            )
-                                            res.onSuccess {
-                                                Toast.makeText(context, "เพิ่มเข้าคิวจัดส่งเรียบร้อยแล้ว!", Toast.LENGTH_SHORT).show()
-                                                onNavigateToQueue()
-                                            }.onFailure {
-                                                Toast.makeText(context, "เพิ่มไม่สำเร็จ: ${it.message}", Toast.LENGTH_SHORT).show()
-                                            }
-                                        }
-                                    },
-                                    modifier = Modifier.weight(1.2f),
-                                    colors = ButtonDefaults.buttonColors(containerColor = TealPrimary),
-                                    shape = RoundedCornerShape(8.dp)
-                                ) {
-                                    Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
-                                    Spacer(modifier = Modifier.width(4.dp))
-                                    Text("+ เพิ่มเข้านำทาง", fontSize = 13.sp, fontWeight = FontWeight.Bold)
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Candidate Recommendations (บ้านใกล้เคียงที่ระบบแนะนำ)
-            if (candidates.isNotEmpty()) {
-                item {
-                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Default.Star, contentDescription = null, tint = StatusPending, modifier = Modifier.size(16.dp))
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text(
-                                "บ้านใกล้เคียงที่ระบบแนะนำ (${candidates.size} รายการ)",
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 13.sp,
-                                color = TextPrimary
-                            )
-                        }
-
-                        candidates.forEach { candidate ->
-                            Card(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable {
-                                        val oldPrimary = primaryMatch
-                                        primaryMatch = candidate
-                                        candidates = (candidates - candidate) + listOfNotNull(oldPrimary)
-                                    },
-                                shape = RoundedCornerShape(10.dp),
-                                colors = CardDefaults.cardColors(containerColor = SurfaceCard),
-                                elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
-                            ) {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth().padding(10.dp),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Column(modifier = Modifier.weight(1f)) {
-                                        Text(
-                                            text = candidate.house.fullName ?: "ไม่ระบุชื่อ",
-                                            fontWeight = FontWeight.Bold,
-                                            fontSize = 13.sp
-                                        )
-                                        Text(
-                                            text = candidate.house.address ?: "ไม่มีที่อยู่",
-                                            fontSize = 11.sp,
-                                            color = TextSecondary,
-                                            maxLines = 1
-                                        )
-                                        if (candidate.reasons.isNotEmpty()) {
-                                            Text(
-                                                text = candidate.reasons.joinToString(" • "),
-                                                fontSize = 10.sp,
-                                                color = TealDark
-                                            )
-                                        }
-                                    }
-
-                                    Surface(
-                                        color = NeutralBackground,
-                                        shape = RoundedCornerShape(6.dp)
-                                    ) {
-                                        Text(
-                                            text = "เลือกหลังนี้",
-                                            fontSize = 11.sp,
-                                            fontWeight = FontWeight.SemiBold,
-                                            color = TealPrimary,
-                                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            // In-sheet Manual Search (ค้นหาบ้านเองเมื่อผลไม่ตรง)
-            item {
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(12.dp),
-                    colors = CardDefaults.cardColors(containerColor = SurfaceCard),
-                    elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
-                ) {
-                    Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Default.Search, contentDescription = null, tint = TextMuted, modifier = Modifier.size(16.dp))
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("ค้นหาบ้านในคลังเอง", fontWeight = FontWeight.Bold, fontSize = 13.sp)
-                        }
-
-                        OutlinedTextField(
-                            value = manualSearchQuery,
-                            onValueChange = { manualSearchQuery = it },
-                            placeholder = { Text("พิมพ์เลขที่บ้าน หรือชื่อผู้รับเพื่อเลือกจากคลัง...", fontSize = 12.sp) },
-                            modifier = Modifier.fillMaxWidth(),
-                            singleLine = true,
-                            shape = RoundedCornerShape(8.dp),
-                            trailingIcon = {
-                                if (manualSearchQuery.isNotEmpty()) {
-                                    IconButton(onClick = { manualSearchQuery = "" }) {
-                                        Icon(Icons.Default.Close, contentDescription = "ล้าง")
-                                    }
-                                }
-                            }
-                        )
-
-                        if (manualSearchResults.isNotEmpty()) {
-                            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                                manualSearchResults.forEach { foundHouse ->
-                                    Surface(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .clickable {
-                                                primaryMatch = MatchResult(
-                                                    house = foundHouse,
-                                                    score = 100,
-                                                    level = "exact",
-                                                    reasons = listOf("เลือกด้วยตนเอง"),
-                                                    trackingCandidate = draftFields.tracking
-                                                )
-                                                manualSearchQuery = ""
-                                                manualSearchResults = emptyList()
-                                            },
-                                        shape = RoundedCornerShape(8.dp),
-                                        color = NeutralBackground
-                                    ) {
-                                        Row(
-                                            modifier = Modifier.padding(8.dp),
-                                            horizontalArrangement = Arrangement.SpaceBetween,
-                                            verticalAlignment = Alignment.CenterVertically
-                                        ) {
-                                            Column(modifier = Modifier.weight(1f)) {
-                                                Text(foundHouse.fullName ?: "ไม่ระบุชื่อ", fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                                                Text(foundHouse.address ?: "", fontSize = 11.sp, color = TextSecondary, maxLines = 1)
-                                            }
-                                            Text("เลือก", fontSize = 11.sp, color = TealDark, fontWeight = FontWeight.Bold)
-                                        }
-                                    }
-                                }
-                            }
+                            Icon(Icons.Default.Search, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("ค้นหา")
                         }
                     }
                 }
             }
         }
+    }
+
+    // Blocking Loader
+    BlockingLoader(
+        open = loading,
+        title = loadingTitle,
+        stage = loadingStage,
+        message = "ระบบกำลังอ่านและเทียบข้อมูล กรุณารอสักครู่"
+    )
+
+    // Result Sheet Dialog
+    ScanResultSheet(
+        open = sheetOpen && !loading,
+        house = matchedHouse,
+        match = primaryMatch,
+        draft = draftFields,
+        candidates = candidates,
+        tracking = trackingNumber,
+        sameParcel = sameParcel,
+        notice = noticeMessage,
+        busy = isAddingToNav,
+        added = addedSuccess,
+        onClose = {
+            sheetOpen = false
+            cooldownUntil = System.currentTimeMillis() + 1800
+        },
+        onAdd = { form -> handleAddToNavigation(form, force = false) },
+        onSave = { form, note -> handleSaveHouse(form, note) },
+        onSelectCandidate = { cand ->
+            val prevPrimary = primaryMatch
+            primaryMatch = cand
+            matchedHouse = cand.house
+            candidates = (candidates - cand) + listOfNotNull(prevPrimary)
+            addedSuccess = false
+        },
+        allHouses = houses,
+        onScanAgain = {
+            sheetOpen = false
+            cooldownUntil = 0L
+            matchedHouse = null
+            primaryMatch = null
+            draftFields = LabelFields()
+            candidates = emptyList()
+            trackingNumber = null
+            sameParcel = null
+            addedSuccess = false
+            scanning = true
+        }
+    )
+
+    // Duplicate tracking confirmation dialog
+    if (showDuplicateConfirmDialog) {
+        val form = pendingDuplicateForm
+        ConfirmActionDialog(
+            title = "เลขพัสดุนี้ถูกบันทึกวันนี้แล้ว",
+            message = "เลขพัสดุ ${form?.tracking ?: ""} ถูกบันทึกในระบบวันนี้แล้ว ต้องการเพิ่มซ้ำหรือไม่?",
+            confirmText = "เพิ่มซ้ำ",
+            onDismiss = {
+                showDuplicateConfirmDialog = false
+                pendingDuplicateForm = null
+            },
+            onConfirm = {
+                showDuplicateConfirmDialog = false
+                form?.let { handleAddToNavigation(it, force = true) }
+                pendingDuplicateForm = null
+            }
+        )
     }
 }
